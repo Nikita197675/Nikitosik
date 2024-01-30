@@ -1731,7 +1731,13 @@ end)
 spawn(function()
 	while true do
 		if farmfistactive and game.Players.LocalPlayer.Character:WaitForChild("Humanoid") then
-			if tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 10e12 then
+			if	tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 1e15 then
+				game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(830, 17149, 786)
+				fistarguments = {"+FS7"}
+				farmpsychicactive = false
+				FarmPsychic.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
+				FarmPsychic.Text = "Farm Psychic Strength: OFF"
+			else	tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 10e12 then
 				game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(-369, 15735, -9)
 				fistarguments = {"+FS6"}
 				farmpsychicactive = false
@@ -1746,12 +1752,6 @@ spawn(function()
 			elseif tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 1e09 then
 				game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(1176, 4789, -2293)
 				fistarguments = {"+FS4"}
-				farmpsychicactive = false
-				FarmPsychic.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
-				FarmPsychic.Text = "Farm Psychic Strength: OFF"
-			elseif  tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 1e15 then
-				game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(830, 17149, 786)
-				fistarguments = {"+FS7"}
 				farmpsychicactive = false
 				FarmPsychic.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)
 				FarmPsychic.Text = "Farm Psychic Strength: OFF"
