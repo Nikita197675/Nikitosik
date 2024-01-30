@@ -1731,7 +1731,7 @@ end)
 spawn(function()
 	while true do
 		if farmfistactive and game.Players.LocalPlayer.Character:WaitForChild("Humanoid") then
-			if	tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 1e15 then
+			if tonumber(string.format("%.0f", game.Players.LocalPlayer.PrivateStats.FistStrength.Value)) >= 1e15 then
 				game.Players.LocalPlayer.Character.HumanoidRootPart.CFrame = CFrame.new(830, 17149, 786)
 				fistarguments = {"+FS7"}
 				farmpsychicactive = false
