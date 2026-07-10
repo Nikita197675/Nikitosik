@@ -1,0 +1,195 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+
+local player = Players.LocalPlayer
+
+local Settings = {
+    DashMultiplier = 1.08,
+    HoldWalkSpeed = 0,
+    IsEnabled = true,
+}
+
+local activeConnections = {}
+local holdWalkConn = nil
+local dashConn = nil
+local isHolding = false
+local isUnloaded = false
+
+local function unanchor()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root and root.Anchored then
+        root.Anchored = false
+    end
+end
+
+-- =====================================
+-- 1. ГЕНИАЛЬНЫЙ МАТЕМАТИЧЕСКИЙ ДЭШ (БЕЗ ХУКОВ)
+-- =====================================
+-- Вместо попыток перехватить C++ движок Роблокса, мы просто читаем текущую 
+-- скорость рывка и пропорционально "доталкиваем" персонажа.
+dashConn = RunService.RenderStepped:Connect(function(delta)
+    if isUnloaded or not Settings.IsEnabled then return end
+    
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if char and root then
+        -- Проверяем, идет ли сейчас рывок (игра создает эти маркеры)
+        if root:FindFirstChild("dodgevelocity") or root:FindFirstChild("moveme") or root:FindFirstChild("dashvelocity") then
+            -- Читаем реальную физическую скорость
+            local vel = root.AssemblyLinearVelocity
+            local horizontalVel = Vector3.new(vel.X, 0, vel.Z)
+            
+            -- Если мы действительно летим в рывке (а не просто стоим)
+            if horizontalVel.Magnitude > 10 then
+                -- Высчитываем добавочную дистанцию на основе множителя.
+                -- Если множитель 1.2x, мы добавляем 20% к дистанции, которую пролетел игрок за этот кадр.
+                local extraTranslation = horizontalVel * delta * (Settings.DashMultiplier - 1)
+                
+                -- Плавно двигаем персонажа
+                char:TranslateBy(extraTranslation)
+            end
+        end
+    end
+end)
+
+-- =====================================
+-- 2. ЛОГИКА УДЕРЖАНИЯ КНОПКИ (HOLD)
+-- =====================================
+local function toggleHold(state)
+    if isUnloaded then return end
+    isHolding = state
+    if holdWalkConn then holdWalkConn:Disconnect() end
+    
+    if isHolding then
+        holdWalkConn = RunService.RenderStepped:Connect(function(delta)
+            if not Settings.IsEnabled or not isHolding or isUnloaded then return end
+            
+            local char = player.Character
+            local humanoid = char and char:FindFirstChildWhichIsA("Humanoid")
+            if char and humanoid and humanoid.MoveDirection.Magnitude > 0 then
+                char:TranslateBy(humanoid.MoveDirection * Settings.HoldWalkSpeed * delta * 10)
+            end
+        end)
+    end
+end
+
+local uisBegan = UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe or not Settings.IsEnabled or isUnloaded then return end
+    if input.KeyCode == Enum.KeyCode.LeftControl then
+        toggleHold(true)
+    end
+end)
+
+local uisEnded = UserInputService.InputEnded:Connect(function(input, gpe)
+    if input.KeyCode == Enum.KeyCode.LeftControl then
+        toggleHold(false)
+    end
+end)
+
+table.insert(activeConnections, uisBegan)
+table.insert(activeConnections, uisEnded)
+
+-- =====================================
+-- 3. RAYFIELD GUI
+-- =====================================
+local Window = Rayfield:CreateWindow({
+   Name = "TSB Movement Hook",
+   LoadingTitle = "Загрузка скрипта...",
+   LoadingSubtitle = "by 90opp & ENI (V6 Math Engine)",
+   ConfigurationSaving = { Enabled = false },
+   KeySystem = false,
+})
+
+local Tab = Window:CreateTab("Управление", 4483362458)
+
+Tab:CreateToggle({
+   Name = "Включить скрипт (Master Switch)",
+   CurrentValue = true,
+   Flag = "MasterToggle", 
+   Callback = function(Value)
+        Settings.IsEnabled = Value
+        if not Value then unanchor() end
+   end,
+})
+
+Tab:CreateInput({
+   Name = "Множитель Дэша (ввод числа)",
+   PlaceholderText = "Введи число (текущее: " .. Settings.DashMultiplier .. ")",
+   RemoveTextAfterFocusLost = false,
+   Callback = function(Text)
+       local num = tonumber(Text)
+       if num then
+           Settings.DashMultiplier = num
+           Rayfield:Notify({
+               Title = "Успех",
+               Content = "Множитель дэша установлен на: " .. tostring(num),
+               Duration = 2,
+           })
+       end
+   end,
+})
+
+Tab:CreateInput({
+   Name = "Скорость бега при удержании Ctrl",
+   PlaceholderText = "Введи число (текущее: " .. Settings.HoldWalkSpeed .. ")",
+   RemoveTextAfterFocusLost = false,
+   Callback = function(Text)
+       local num = tonumber(Text)
+       if num then
+           Settings.HoldWalkSpeed = num
+           Rayfield:Notify({
+               Title = "Успех",
+               Content = "Скорость удержания установлена на: " .. tostring(num),
+               Duration = 2,
+           })
+       end
+   end,
+})
+
+local isAnchored = false
+Tab:CreateKeybind({
+   Name = "Кнопка заморозки (Anchor)",
+   CurrentKeybind = "T",
+   HoldToInteract = false,
+   Flag = "AnchorBind",
+   Callback = function()
+        if not Settings.IsEnabled or isUnloaded then return end
+        local char = player.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
+        if root then 
+            isAnchored = not root.Anchored
+            root.Anchored = isAnchored
+            Rayfield:Notify({
+                Title = "Anchor",
+                Content = isAnchored and "Заморожен" or "Разморожен",
+                Duration = 1.5,
+            })
+        end
+   end,
+})
+
+Tab:CreateButton({
+   Name = "Выгрузить скрипт (Unload)",
+   Callback = function()
+        Settings.IsEnabled = false
+        isUnloaded = true 
+        unanchor()
+        
+        if dashConn then dashConn:Disconnect() end
+        if holdWalkConn then holdWalkConn:Disconnect() end
+        for _, conn in ipairs(activeConnections) do
+            if conn and conn.Connected then conn:Disconnect() end
+        end
+        table.clear(activeConnections)
+        
+        pcall(function() Rayfield:Destroy() end)
+        local coreGui = game:GetService("CoreGui")
+        local rfUI = coreGui:FindFirstChild("Rayfield")
+        if rfUI then rfUI:Destroy() end
+   end,
+})
