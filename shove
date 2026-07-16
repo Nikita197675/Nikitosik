@@ -1,0 +1,348 @@
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local CoreGui = game:GetService("CoreGui")
+
+-- === НАСТРОЙКИ ===
+local SKILL_ANIM_ID  = "rbxassetid://10471336737"
+local CLICK_DELAY    = 0.3
+local AIM_HOLD_DELAY = 0.30
+local DASH_DELAY     = 0.4
+local ESCAPE_RADIUS  = 10
+local AIM_SMOOTHNESS = 0.4
+
+local TOGGLE_KEY     = Enum.KeyCode.H
+local BLOCK_KEY      = Enum.KeyCode.F
+local GUI_TOGGLE_KEY = Enum.KeyCode.P
+-- === КОНЕЦ НАСТРОЕК ===
+
+local player = Players.LocalPlayer
+local myChar, myHRP
+
+local isToggledOn    = false
+local scriptRunning  = true
+local toggleDebounce = 0
+local guiDebounce    = 0
+
+local isActionRunning  = false
+local isAiming         = false
+local escapeTargetChar = nil
+
+local activeConnections = {}
+local enemyConnections  = {}
+local activeCasters     = {}
+
+-- === GUI ===
+local gui = Instance.new("ScreenGui")
+gui.Name = "ENIEscapeTester"
+gui.ResetOnSpawn = false
+local ok = pcall(function() gui.Parent = CoreGui end)
+if not ok then gui.Parent = player:WaitForChild("PlayerGui") end
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 200, 0, 210)
+mainFrame.Position = UDim2.new(0.5, -100, 0, 20)
+mainFrame.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = gui
+
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, 0, 0, 30)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "Status: OFF (Press H)"
+titleLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+titleLabel.Font = Enum.Font.SourceSansBold
+titleLabel.TextSize = 18
+titleLabel.Parent = mainFrame
+
+local function makeRow(labelText, defaultValue, yPos, onChanged)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0.6, 0, 0, 30)
+    lbl.Position = UDim2.new(0, 10, 0, yPos)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = labelText
+    lbl.TextColor3 = Color3.fromRGB(255, 255, 255)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Font = Enum.Font.SourceSans
+    lbl.TextSize = 16
+    lbl.Parent = mainFrame
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(0.3, 0, 0, 24)
+    box.Position = UDim2.new(0.6, 0, 0, yPos + 3)
+    box.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    box.TextColor3 = Color3.fromRGB(255, 255, 255)
+    box.Text = tostring(defaultValue)
+    box.Font = Enum.Font.SourceSansBold
+    box.TextSize = 16
+    box.Parent = mainFrame
+
+    box.FocusLost:Connect(function()
+        local num = tonumber(box.Text)
+        if num then
+            onChanged(num)
+        else
+            box.Text = tostring(defaultValue)
+        end
+    end)
+end
+
+makeRow("Click (sec):",    CLICK_DELAY,    40,  function(v) CLICK_DELAY    = v end)
+makeRow("Dash (sec):",     DASH_DELAY,     80,  function(v) DASH_DELAY     = v end)
+makeRow("Aim Hold (sec):", AIM_HOLD_DELAY, 120, function(v) AIM_HOLD_DELAY = v end)
+makeRow("Radius (studs):", ESCAPE_RADIUS,  160, function(v) ESCAPE_RADIUS  = v end)
+
+-- === УТИЛИТЫ ===
+local function addConn(tbl, conn)
+    table.insert(tbl, conn)
+    return conn
+end
+
+local function disconnectAll(tbl)
+    for _, c in pairs(tbl) do
+        if c and c.Connected then c:Disconnect() end
+    end
+    table.clear(tbl)
+end
+
+local function updateLocalCharacter()
+    myChar = player.Character
+    myHRP  = myChar and myChar:WaitForChild("HumanoidRootPart", 3) or nil
+end
+
+local function fullCleanup()
+    scriptRunning  = false
+    isToggledOn    = false
+    isActionRunning = false
+    isAiming        = false
+    escapeTargetChar = nil
+    table.clear(activeCasters)
+    if gui then gui:Destroy() end
+    pcall(function() RunService:UnbindFromRenderStep("ENIAimRender") end)
+    disconnectAll(activeConnections)
+    disconnectAll(enemyConnections)
+end
+
+-- === ПРОВЕРКА СТАНА / РЭГДОЛЛА ===
+local function isRagdolled()
+    if not myChar or not myHRP then return true end
+    local hum = myChar:FindFirstChildWhichIsA("Humanoid")
+    if not hum then return true end
+    if hum.PlatformStand then return true end
+    local state = hum:GetState()
+    if state == Enum.HumanoidStateType.FallingDown
+    or state == Enum.HumanoidStateType.PlatformStanding
+    or state == Enum.HumanoidStateType.Physics then
+        return true
+    end
+    if myChar:FindFirstChild("Ragdoll")
+    or myChar:FindFirstChild("RagdollSim")
+    or myChar:FindFirstChild("Freeze") then
+        return true
+    end
+    return false
+end
+
+-- === АИМ ===
+local function applyAim()
+    if not isAiming or not escapeTargetChar or not myHRP or isRagdolled() then return end
+    local tHRP = escapeTargetChar:FindFirstChild("HumanoidRootPart")
+    if not tHRP then return end
+    local myPos    = myHRP.Position
+    local flatTgt  = Vector3.new(tHRP.Position.X, myPos.Y, tHRP.Position.Z)
+    if (flatTgt - myPos).Magnitude < 0.1 then return end
+    local linVel   = myHRP.AssemblyLinearVelocity
+    myHRP.CFrame   = myHRP.CFrame:Lerp(CFrame.lookAt(myPos, flatTgt), AIM_SMOOTHNESS)
+    myHRP.AssemblyLinearVelocity  = linVel
+    myHRP.AssemblyAngularVelocity = Vector3.zero
+end
+
+-- Только один вызов аима за кадр — RenderStep с наивысшим приоритетом
+RunService:BindToRenderStep("ENIAimRender", Enum.RenderPriority.Last.Value, applyAim)
+
+-- === ДЕЙСТВИЯ ===
+local function doM1Click()
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+    task.wait(0.03)
+    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+end
+
+local function doDashMove()
+    VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.D, false, game)
+    task.wait(0.01)
+    VirtualInputManager:SendKeyEvent(true,  Enum.KeyCode.Q, false, game)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.Q, false, game)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.D, false, game)
+end
+
+local function performEscapeSequence(targetModel, elapsedTime)
+    if not isToggledOn or not scriptRunning or isRagdolled() then return end
+    elapsedTime = elapsedTime or 0
+
+    local hum = myChar and myChar:FindFirstChildWhichIsA("Humanoid")
+
+    local clickT  = math.max(0, CLICK_DELAY    - elapsedTime)
+    local aimT    = math.max(0, AIM_HOLD_DELAY - elapsedTime)
+    local dashT   = math.max(0, DASH_DELAY     - elapsedTime)
+
+    escapeTargetChar = targetModel
+    isAiming         = true
+    if hum then hum.AutoRotate = false end
+
+    task.delay(aimT, function()
+        isAiming = false
+        if hum and scriptRunning then hum.AutoRotate = true end
+    end)
+
+    task.delay(clickT, function()
+        if scriptRunning and not isRagdolled() then doM1Click() end
+    end)
+
+    task.delay(dashT, function()
+        if scriptRunning and not isRagdolled() then doDashMove() end
+    end)
+
+    task.delay(math.max(clickT, aimT, dashT) + 0.2, function()
+        escapeTargetChar = nil
+        isActionRunning  = false
+    end)
+end
+
+-- === ТРЕКЕР УГРОЗ ===
+addConn(activeConnections, RunService.Heartbeat:Connect(function()
+    if not isToggledOn or not scriptRunning or isActionRunning or not myHRP or isRagdolled() then return end
+
+    local closestDist = ESCAPE_RADIUS + 0.1
+    local bestTrack, bestChar = nil, nil
+
+    for enemyChar, track in pairs(activeCasters) do
+        if enemyChar and enemyChar.Parent and track.IsPlaying then
+            local eHRP = enemyChar:FindFirstChild("HumanoidRootPart")
+            if eHRP then
+                local dist = (myHRP.Position - eHRP.Position).Magnitude
+                if dist <= ESCAPE_RADIUS and dist < closestDist then
+                    closestDist = dist
+                    bestTrack   = track
+                    bestChar    = enemyChar
+                end
+            end
+        else
+            activeCasters[enemyChar] = nil
+        end
+    end
+
+    if bestTrack and bestChar then
+        isActionRunning = true
+        activeCasters[bestChar] = nil
+
+        pcall(function() VirtualInputManager:SendKeyEvent(false, BLOCK_KEY,         false, game) end)
+        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.W,    false, game) end)
+        pcall(function() VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.S,    false, game) end)
+
+        performEscapeSequence(bestChar, bestTrack.TimePosition)
+    end
+end))
+
+-- === ХУК АНИМАТОРА ===
+local function hookAnimator(p, char)
+    local humanoid = char:WaitForChild("Humanoid", 3)
+    if not humanoid then return end
+    local animator = humanoid:WaitForChild("Animator", 3)
+    if not animator then return end
+
+    addConn(enemyConnections, animator.AnimationPlayed:Connect(function(track)
+        if track.Animation.AnimationId == SKILL_ANIM_ID then
+            activeCasters[char] = track
+            track.Stopped:Once(function()
+                if activeCasters[char] == track then
+                    activeCasters[char] = nil
+                end
+            end)
+        end
+    end))
+end
+
+-- ФИЧ #1: Подписка на CharacterAdded КАЖДОГО существующего игрока (не только новых)
+local function watchAllPlayers()
+    disconnectAll(enemyConnections)
+    table.clear(activeCasters)
+
+    for _, p in ipairs(Players:GetPlayers()) do
+        if p ~= player then
+            -- Текущий персонаж
+            if p.Character then
+                hookAnimator(p, p.Character)
+            end
+            -- ФИЧ: следить за респавном уже существующего врага
+            addConn(enemyConnections, p.CharacterAdded:Connect(function(char)
+                hookAnimator(p, char)
+            end))
+        end
+    end
+
+    -- Новые игроки, которые зайдут после включения скрипта
+    addConn(enemyConnections, Players.PlayerAdded:Connect(function(p)
+        if p == player then return end
+        p.CharacterAdded:Connect(function(char)
+            hookAnimator(p, char)
+        end)
+    end))
+end
+
+-- === ИНИЦИАЛИЗАЦИЯ ===
+updateLocalCharacter()
+
+-- ФИЧ #2: При респавне локального игрока — переподключаем всё автоматически
+addConn(activeConnections, player.CharacterAdded:Connect(function()
+    updateLocalCharacter()
+    isActionRunning  = false
+    isAiming         = false
+    escapeTargetChar = nil
+    table.clear(activeCasters)
+
+    -- Если скрипт был включён — восстанавливаем слежку без ручного H+H
+    if isToggledOn then
+        watchAllPlayers()
+    end
+end))
+
+-- === ВВОД ===
+addConn(activeConnections, UserInputService.InputBegan:Connect(function(input, gpe)
+    if not scriptRunning or gpe then return end
+
+    if input.KeyCode == GUI_TOGGLE_KEY and not UserInputService:IsKeyDown(Enum.KeyCode.L) then
+        if tick() - guiDebounce > 0.3 then
+            guiDebounce = tick()
+            gui.Enabled = not gui.Enabled
+        end
+    end
+
+    if input.KeyCode == TOGGLE_KEY then
+        if tick() - toggleDebounce > 0.3 then
+            toggleDebounce = tick()
+            isToggledOn = not isToggledOn
+
+            if isToggledOn then
+                watchAllPlayers()
+                titleLabel.Text      = "Status: ON"
+                titleLabel.TextColor3 = Color3.fromRGB(100, 255, 100)
+            else
+                disconnectAll(enemyConnections)
+                isActionRunning  = false
+                isAiming         = false
+                escapeTargetChar = nil
+                table.clear(activeCasters)
+                titleLabel.Text      = "Status: OFF"
+                titleLabel.TextColor3 = Color3.fromRGB(255, 100, 100)
+            end
+        end
+    end
+
+    -- P + L = полная выгрузка скрипта
+    if (input.KeyCode == Enum.KeyCode.L and UserInputService:IsKeyDown(Enum.KeyCode.P))
+    or (input.KeyCode == Enum.KeyCode.P and UserInputService:IsKeyDown(Enum.KeyCode.L)) then
+        fullCleanup()
+    end
+end))
