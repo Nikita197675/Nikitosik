@@ -1,0 +1,164 @@
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local VIM = game:GetService("VirtualInputManager")
+local CoreGui = (gethui and gethui()) or game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+-- Защита от дубликатов
+if getgenv().SmartJumpUI then pcall(getgenv().SmartJumpUI) end
+
+local Settings = {
+    Enabled = true,
+    Hotkey = Enum.KeyCode.C
+}
+
+-- Оставляем ТОЛЬКО 3-й клик (Downslam / Uppercut)
+local targetAnimationIds = {
+    ["13532604085"] = true  -- 3rd M1
+}
+
+-- Глобальный флаг макроса
+local isMacroActive = false
+
+-- =====================================
+-- СОЗДАНИЕ UI
+-- =====================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SmartJumpUI"
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 180, 0, 100)
+MainFrame.Position = UDim2.new(0.5, -90, 0.8, -100)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 6)
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Text = "Smart Combo Bind"
+Title.Font = Enum.Font.SourceSansBold
+Title.TextSize = 16
+Title.BorderSizePixel = 0
+Title.Parent = MainFrame
+Instance.new("UICorner", Title).CornerRadius = UDim.new(0, 6)
+
+local BindInput = Instance.new("TextBox")
+BindInput.Size = UDim2.new(1, -20, 0, 25)
+BindInput.Position = UDim2.new(0, 10, 0, 35)
+BindInput.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+BindInput.TextColor3 = Color3.fromRGB(255, 255, 255)
+BindInput.Text = "Bind: " .. Settings.Hotkey.Name
+BindInput.Font = Enum.Font.Code
+BindInput.TextSize = 14
+BindInput.Parent = MainFrame
+Instance.new("UICorner", BindInput).CornerRadius = UDim.new(0, 4)
+
+BindInput.FocusLost:Connect(function()
+    local text = string.upper(string.gsub(BindInput.Text, "Bind: ", ""))
+    local success, key = pcall(function() return Enum.KeyCode[text] end)
+    if success and key then
+        Settings.Hotkey = key
+        BindInput.Text = "Bind: " .. text
+    else
+        BindInput.Text = "Bind: " .. Settings.Hotkey.Name
+    end
+end)
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(1, -20, 0, 25)
+CloseBtn.Position = UDim2.new(0, 10, 1, -30)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Text = "Unload"
+CloseBtn.Font = Enum.Font.SourceSansBold
+CloseBtn.Parent = MainFrame
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 4)
+
+-- =====================================
+-- ЛОГИКА
+-- =====================================
+local connections = {}
+
+-- Эта функция сработает ТОЛЬКО если игра успешно начала анимацию 3-го M1
+local function onAnimationPlayed(animationTrack)
+    if not Settings.Enabled or not isMacroActive then return end
+    
+    local animId = tostring(animationTrack.Animation.AnimationId)
+    local extractedId = string.match(animId, "%d+")
+    
+    if targetAnimationIds[extractedId] then
+        local character = LocalPlayer.Character
+        if character then
+            local humanoid = character:FindFirstChildOfClass("Humanoid")
+            local hrp = character:FindFirstChild("HumanoidRootPart")
+            
+            if humanoid and hrp then
+                -- Идеальный прыжок из твоего скрипта
+                hrp.AssemblyLinearVelocity = Vector3.new(hrp.AssemblyLinearVelocity.X, 50, hrp.AssemblyLinearVelocity.Z)
+                humanoid:ChangeState(Enum.HumanoidStateType.Jumping)
+                
+                -- Выключаем флаг макроса, чтобы не прыгать дважды
+                isMacroActive = false
+            end
+        end
+    end
+end
+
+local function setupCharacter(character)
+    local humanoid = character:WaitForChild("Humanoid", 5)
+    if humanoid then
+        local animator = humanoid:WaitForChild("Animator", 5)
+        if animator then
+            table.insert(connections, animator.AnimationPlayed:Connect(onAnimationPlayed))
+        end
+    end
+end
+
+if LocalPlayer.Character then
+    setupCharacter(LocalPlayer.Character)
+end
+table.insert(connections, LocalPlayer.CharacterAdded:Connect(setupCharacter))
+
+-- Бинд на кнопку
+table.insert(connections, UIS.InputBegan:Connect(function(input, gpe)
+    if gpe or not Settings.Enabled then return end
+    
+    if input.KeyCode == Settings.Hotkey then
+        isMacroActive = true
+        
+        -- Делаем короткую очередь спама M1 (на 0.4 сек)
+        -- Это 100% гарантирует, что 3-й удар зарегается сервером сразу после эндлага
+        task.spawn(function()
+            local endTime = tick() + 0.4
+            while tick() < endTime and isMacroActive do
+                VIM:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                task.wait(0.01)
+                VIM:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+                task.wait(0.02)
+            end
+            isMacroActive = false
+        end)
+    end
+end))
+
+-- =====================================
+-- АНЛОАД
+-- =====================================
+getgenv().SmartJumpUI = function()
+    Settings.Enabled = false
+    isMacroActive = false
+    for _, c in ipairs(connections) do
+        if c.Connected then c:Disconnect() end
+    end
+    table.clear(connections)
+    if ScreenGui then ScreenGui:Destroy() end
+    getgenv().SmartJumpUI = nil
+end
+
+CloseBtn.MouseButton1Click:Connect(getgenv().SmartJumpUI)
