@@ -1,0 +1,209 @@
+local Players = game:GetService("Players")
+local UIS = game:GetService("UserInputService")
+local CoreGui = (gethui and gethui()) or game:GetService("CoreGui")
+local LocalPlayer = Players.LocalPlayer
+
+-- Защита от дубликатов
+if getgenv().SideDashUI then
+    pcall(getgenv().SideDashUI)
+end
+
+local Settings = {
+    Enabled = true,
+    SideDashDelay = 0.32, -- Стартовое время
+    HideKey = Enum.KeyCode.RightControl -- Кнопка скрытия меню (Правый Ctrl)
+}
+
+-- ID анимаций боковых рывков
+local SIDE_DASH_IDS = {
+    ["rbxassetid://10480796021"] = true,
+    ["rbxassetid://10480793962"] = true,
+}
+
+-- =====================================
+-- СОЗДАНИЕ МИНИ-UI
+-- =====================================
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "SideDashUI"
+ScreenGui.Parent = CoreGui
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 230, 0, 115)
+MainFrame.Position = UDim2.new(0.5, -115, 0.8, -115)
+MainFrame.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 6)
+UICorner.Parent = MainFrame
+
+local Title = Instance.new("TextLabel")
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+Title.TextColor3 = Color3.fromRGB(255, 255, 255)
+Title.Text = "Side Dash (Hide: R-Ctrl)"
+Title.Font = Enum.Font.SourceSansBold
+Title.TextSize = 16
+Title.BorderSizePixel = 0
+Title.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 6)
+TitleCorner.Parent = Title
+
+local function CreateRow(name, yPos, key)
+    local Label = Instance.new("TextLabel")
+    Label.Size = UDim2.new(1, -110, 0, 25)
+    Label.Position = UDim2.new(0, 10, 0, yPos)
+    Label.BackgroundTransparency = 1
+    Label.TextColor3 = Color3.fromRGB(220, 220, 220)
+    Label.Text = name .. ":"
+    Label.Font = Enum.Font.SourceSansSemibold
+    Label.TextSize = 14
+    Label.TextXAlignment = Enum.TextXAlignment.Left
+    Label.Parent = MainFrame
+
+    -- Кнопка минус
+    local BtnMinus = Instance.new("TextButton")
+    BtnMinus.Size = UDim2.new(0, 22, 0, 22)
+    BtnMinus.Position = UDim2.new(1, -95, 0, yPos + 1)
+    BtnMinus.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    BtnMinus.TextColor3 = Color3.fromRGB(255, 255, 255)
+    BtnMinus.Text = "-"
+    BtnMinus.Parent = MainFrame
+    Instance.new("UICorner", BtnMinus).CornerRadius = UDim.new(0, 4)
+
+    -- Поле для ввода своего значения
+    local InputBox = Instance.new("TextBox")
+    InputBox.Size = UDim2.new(0, 40, 0, 22)
+    InputBox.Position = UDim2.new(1, -70, 0, yPos + 1)
+    InputBox.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+    InputBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+    InputBox.Text = string.format("%.3f", Settings[key])
+    InputBox.Font = Enum.Font.Code
+    InputBox.TextSize = 13
+    InputBox.Parent = MainFrame
+    Instance.new("UICorner", InputBox).CornerRadius = UDim.new(0, 4)
+
+    -- Кнопка плюс
+    local BtnPlus = Instance.new("TextButton")
+    BtnPlus.Size = UDim2.new(0, 22, 0, 22)
+    BtnPlus.Position = UDim2.new(1, -27, 0, yPos + 1)
+    BtnPlus.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+    BtnPlus.TextColor3 = Color3.fromRGB(255, 255, 255)
+    BtnPlus.Text = "+"
+    BtnPlus.Parent = MainFrame
+    Instance.new("UICorner", BtnPlus).CornerRadius = UDim.new(0, 4)
+
+    local function UpdateText()
+        InputBox.Text = string.format("%.3f", Settings[key])
+    end
+
+    BtnPlus.MouseButton1Click:Connect(function()
+        Settings[key] = math.clamp(Settings[key] + 0.01, 0, 5)
+        UpdateText()
+    end)
+
+    BtnMinus.MouseButton1Click:Connect(function()
+        Settings[key] = math.clamp(Settings[key] - 0.01, 0, 5)
+        UpdateText()
+    end)
+
+    -- Логика ручного ввода
+    InputBox.FocusLost:Connect(function()
+        local num = tonumber(InputBox.Text)
+        if num then
+            Settings[key] = num
+        end
+        UpdateText()
+    end)
+end
+
+CreateRow("Cancel Delay", 40, "SideDashDelay")
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Size = UDim2.new(1, -20, 0, 25)
+CloseBtn.Position = UDim2.new(0, 10, 1, -30)
+CloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+CloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+CloseBtn.Text = "Unload Script"
+CloseBtn.Font = Enum.Font.SourceSansBold
+CloseBtn.Parent = MainFrame
+Instance.new("UICorner", CloseBtn).CornerRadius = UDim.new(0, 4)
+
+-- =====================================
+-- ЛОГИКА ОТМЕНЫ ЭНДЛАГА
+-- =====================================
+local connections = {}
+
+-- Биндим скрытие меню
+table.insert(connections, UIS.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Settings.HideKey then
+        MainFrame.Visible = not MainFrame.Visible
+    end
+end))
+
+local function HookCharacter(char)
+    if not char then return end
+    local hum = char:WaitForChild("Humanoid", 5)
+    if not hum then return end
+    local animator = hum:WaitForChild("Animator", 5)
+    if not animator then return end
+
+    table.insert(connections, animator.AnimationPlayed:Connect(function(track)
+        if not Settings.Enabled or not track.Animation then return end
+        
+        local id = track.Animation.AnimationId
+        
+        if SIDE_DASH_IDS[id] then
+            task.delay(Settings.SideDashDelay, function()
+                if not Settings.Enabled or not char.Parent then return end
+                
+                -- Обнуляем все кулдауны
+                char:SetAttribute("_LastDash", 0)
+                char:SetAttribute("JustLeftDashed", 0)
+                char:SetAttribute("JustRightDashed", 0)
+                char:SetAttribute("_JustDashed", 0)
+                
+                -- Переименовываем визуальный маркер
+                local usedDash = char:FindFirstChild("UsedDash")
+                if usedDash then 
+                    usedDash.Name = "GhostMarker" 
+                end
+                
+                -- Переименовываем физику
+                local root = char:FindFirstChild("HumanoidRootPart")
+                if root then
+                    local vel = root:FindFirstChild("dodgevelocity")
+                    if vel then 
+                        vel.Name = "GhostVelocity" 
+                    end
+                end
+            end)
+        end
+    end))
+end
+
+if LocalPlayer.Character then
+    HookCharacter(LocalPlayer.Character)
+end
+table.insert(connections, LocalPlayer.CharacterAdded:Connect(HookCharacter))
+
+-- =====================================
+-- АНЛОАД
+-- =====================================
+getgenv().SideDashUI = function()
+    Settings.Enabled = false
+    for _, c in ipairs(connections) do
+        if c.Connected then c:Disconnect() end
+    end
+    table.clear(connections)
+    if ScreenGui then ScreenGui:Destroy() end
+    getgenv().SideDashUI = nil
+end
+
+CloseBtn.MouseButton1Click:Connect(getgenv().SideDashUI)
