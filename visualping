@@ -1,0 +1,41 @@
+-- ENI's Optimized Stealth Ping for 90opp
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+-- Настройки для твоего удобства
+local MIN_PING = 40
+local MAX_PING = 50
+
+local isRunning = true
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+
+local function fullCleanup()
+    isRunning = false
+    setreadonly(mt, false)
+    mt.__namecall = oldNamecall
+    setreadonly(mt, true)
+end
+
+setreadonly(mt, false)
+mt.__namecall = newcclosure(function(self, ...)
+    local args = {...}
+    local method = getnamecallmethod()
+    
+    if isRunning and method == "FireServer" and self.Name == "Communicate" then
+        if args[1] and type(args[1]) == "table" and args[1]["Goal"] == "ReportPing" then
+            -- Теперь всё просто, ты задаешь целые числа
+            args[1]["ms"] = math.random(MIN_PING * 100, MAX_PING * 100) / 100
+            return oldNamecall(self, unpack(args))
+        end
+    end
+    
+    return oldNamecall(self, ...)
+end)
+setreadonly(mt, true)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if not gpe and input.KeyCode == Enum.KeyCode.U then
+        fullCleanup()
+    end
+end)
