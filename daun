@@ -7,7 +7,7 @@ local Players = game:GetService("Players")
 local player = Players.LocalPlayer
 
 local Settings = {
-    DashMultiplier = 1.06,
+    DashMultiplier = 1.03,
     HoldWalkSpeed = 0,
     IsEnabled = true,
 }
