@@ -1,1 +1,2250 @@
+-- DungeonBot.lua — легитный тестер-бот для данжей.
+-- Фаза 1: подбегание к мобам. Фаза 2: скиллы через ремоуты Tool'ов
+-- (Backpack["Geyser"].abilityEvent:FireServer() и т.д.) — per-skill кд,
+-- юзаются только «одетые» скиллы.
+-- Движение: ТОЛЬКО Humanoid:MoveTo (штатный путь, реплицируется как обычная ходьба).
+-- Спид-буст: держит WalkSpeed = 20 (на границе лимита 20; если лимитер откатывает —
+-- вернуть SPEED_BOOST = 19), как abilities-ускорители. Двойная защита: ворчер на
+-- изменение свойства (мгновенно, если сбросили ниже 20) + периодический тик
+-- раз 0.5с (speedBoostTick) — игра сбрасывает скорость в самых разных местах.
+-- Автостарт: бот включён сразу при загрузке; настройки (данж, мастер, тумблеры,
+-- слайдеры, стоп-дистанция/каст, кд скиллов) хранятся в DungeonBot/config.json
+-- (вкладка Config: сохранить/загрузить/сброс, автосейв при каждом изменении) и
+-- автоматически применяются при старте скрипта.
+-- Авто-старт/реплей данжа (вкладка Auto): в данже бот сам жмёт старт через ремоут
+-- changeStartValue (БЕЗ аргументов — как кнопка игры); после убийства босса ЖДЁТ
+-- появления дропа (rewardGuiHolder.holder), пауза на подбор, затем шлёт
+-- replayDungeon с данными воркспейса — полный цикл без кликов.
+-- Таргетинг: перепроверка ближайшего каждые retargetInterval (гистерезис 20%);
+-- моб за невидимым барьером = +30 studs штрафа в рейтинге; чекпоинты: как только
+-- LOS чист при следовании по пути — мгновенный переход на прямой MoveTo.
+-- Маршруты: таблица DUNGEONS (route = полный порядок точек; строго wp N -> N+1).
+-- В бой вступаем при мобе в castRange (дефолт 90 — Northern Lands, мобы агрятся
+-- дальше). Босс-гейты (Northern Lands): точка {pos=.., boss=true} не
+-- засчитывается, пока в bossGateRadius от неё есть живой враг; смерть не
+-- сбрасывает routeIndex — после респавна бот возвращается к гейту.
+-- WAIT_SKILLS: скиллы прожались -> бот стоит ровно кд (касты продлевают) -> бежит.
+-- Аимлок — ТОЛЬКО телом (камеру не трогаем, игра без шифтлока).
+-- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
+-- Если Rayfield не загрузился — переключение бота клавишей B.
+-- Авто-перезапуск: queue_on_teleport грузит скрипт по REMOTE_URL (GitHub) —
+-- после телепорта/перезахода (реплей данжа = смена сервера) бот поднимается
+-- сам, без autoexec; фолбэк — локальная копия DungeonBot/script.lua.
+-- Конфиг (DungeonBot/config.json) применяется автоматически при каждом старте.
 
+-- Запрещённые place/game id: в этих играх скрипт не запускается вообще.
+local BLOCKED_GAME_IDS = {
+	[77649408247578] = true,
+}
+
+if BLOCKED_GAME_IDS[game.GameId] or BLOCKED_GAME_IDS[game.PlaceId] then
+	return
+end
+
+if _G.__DUNGEON_BOT_ACTIVE then
+	return
+end
+_G.__DUNGEON_BOT_ACTIVE = true
+
+-- == Авто-перезапуск после телепорта/перезахода ==
+-- Реплей данжа = телепорт на новый сервер, executor уничтожает скрипт.
+-- queue_on_teleport ставит загрузчик: после телепорта он дожидается загрузки
+-- игры и тянет скрипт по REMOTE_URL (GitHub raw) — бот поднимается сам,
+-- без autoexec и без локального файла. Фолбэк: локальная копия
+-- DungeonBot/script.lua (автосохранение при запуске), если GitHub недоступен.
+-- В запрещённые игры (BLOCKED_GAME_IDS) загрузчик не выполняется.
+
+local REMOTE_URL = "https://raw.githubusercontent.com/Nikita197675/Nikitosik/refs/heads/main/dungeonbot"
+local BOOT_FILE = "DungeonBot/script.lua"
+local boot = { queueSupported = false, fileReady = false }
+
+local function queueTeleport(str)
+	local fn = queue_on_teleport or queueonteleport
+		or (getgenv and (getgenv().queue_on_teleport or getgenv().queueonteleport))
+	if fn == nil then
+		return false
+	end
+	local ok = pcall(fn, str)
+	return ok
+end
+
+do
+	-- Автосохранение своей копии (фолбэк, если GitHub недоступен): executor
+	-- обычно отдаёт путь исполняемого файла в chunk source ("@путь").
+	if writefile ~= nil and readfile ~= nil and not (isfile ~= nil and isfile(BOOT_FILE)) then
+		local source = ""
+		pcall(function()
+			source = debug.getinfo(1, "S").source or ""
+		end)
+		if source:sub(1, 1) == "@" then
+			local path = source:sub(2)
+			local ok, content = pcall(readfile, path)
+			if ok and type(content) == "string" and #content > 1000 then
+				pcall(function()
+					makefolder("DungeonBot")
+				end)
+				pcall(function()
+					writefile(BOOT_FILE, content)
+				end)
+			end
+		end
+	end
+	boot.fileReady = isfile ~= nil and readfile ~= nil and isfile(BOOT_FILE)
+
+	-- Загрузчик: ждёт игру/игрока, проверяет запрещённые id, тянет скрипт
+	-- по URL с ретраями; если GitHub так и не ответил — локальная копия.
+	local blockedIds = {}
+	for id in pairs(BLOCKED_GAME_IDS) do
+		table.insert(blockedIds, ("[%s] = true"):format(id))
+	end
+	local blockedTable = "{" .. table.concat(blockedIds, ", ") .. "}"
+	local loader = ([[
+		repeat task.wait(0.1) until game:IsLoaded()
+		local Players = game:GetService("Players")
+		while Players.LocalPlayer == nil do
+			task.wait(0.1)
+		end
+		task.wait(2)
+		local blocked = %s
+		if blocked[game.GameId] or blocked[game.PlaceId] then
+			return
+		end
+		for _ = 1, 10 do
+			local ok = pcall(function()
+				loadstring(game:HttpGet(%q))()
+			end)
+			if ok then
+				return
+			end
+			task.wait(1)
+		end
+		pcall(function()
+			loadstring(readfile(%q))()
+		end)
+	]]):format(blockedTable, REMOTE_URL, BOOT_FILE)
+	boot.queueSupported = queueTeleport(loader)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local SPEED_BOOST = 20
+local SPEED_NORMAL = 16
+local ENEMY_SIGS = {
+	"aggroRange", "damage", "enemyNameplate", "attackSpeed",
+	"meleeDistance", "moveSpeed", "enemyStyle",
+}
+local ARRIVE_EPS = 3.5
+local TARGET_DRIFT = 6
+local LOS_PENALTY = 30
+local LOS_KNEE_DROP = 1.5
+local HYSTERESIS = 0.2
+local ROUTE_ARRIVE = 6
+local ROUTE_STUCK_SKIP = 15
+local ENGAGE_MARGIN = 2
+local COMPUTE_TIMEOUT = 2
+local POS_STUCK_EPS = 2
+local POS_STUCK_JUMP = 6
+local POS_STUCK_DROP = 15
+local LOG_LINES = 8
+
+-- Вейпоинты данжей: route = куда бежать (порядок = порядок следования, «дошёл» =
+-- ближе ROUTE_ARRIVE, индекс переживает смерть); spawn = ориентиры спавнов мобов
+-- (маркеры в Debug). Ranged-каст (castRange) жмёт скиллы по мобам в радиусе на
+-- ходу, без LOS — боссы за барьерами кастуются. Босс-гейт: точка {pos=.., boss=true}
+-- не засчитывается, пока в bossGateRadius есть живой враг (см. план Northern Lands).
+-- Новые данжи добавляются по этому же образцу.
+local DUNGEONS = {
+	["Ghastly Harbor"] = {
+		route = {
+			Vector3.new(316, 168, 143),
+			Vector3.new(319, 175, 95),
+			Vector3.new(318, 183, -0),
+			Vector3.new(317, 210, -76),
+			Vector3.new(294, 217, -126),
+			Vector3.new(269, 210, -188),
+			Vector3.new(306, 210, -251),
+			Vector3.new(253, 210, -172),
+			Vector3.new(87, 149, -171),
+			Vector3.new(23, 135, -225),
+			Vector3.new(-7, 107, -159),
+			Vector3.new(64, 66, -224),
+			Vector3.new(125, 63, -286),
+			Vector3.new(161, 59, -332),
+			Vector3.new(71, 61, -278),
+			Vector3.new(59, 60, -333),
+			Vector3.new(85, 59, -468),
+			Vector3.new(105, 59, -559),
+			Vector3.new(53, 61, -308),
+			Vector3.new(-21, 63, -319),
+			Vector3.new(-29, 59, -371),
+			Vector3.new(-22, 61, -306),
+			Vector3.new(-115, 61, -274),
+			Vector3.new(-213, 63, -167),
+			Vector3.new(-357, 56, -123),
+			Vector3.new(-190, 61, -154),
+			Vector3.new(-89, 61, -46),
+			Vector3.new(-115, 58, 15),
+			Vector3.new(-180, 58, 33),
+			Vector3.new(-92, 63, 8),
+			Vector3.new(-54, 61, 94),
+			Vector3.new(-133, 47, 235),
+			Vector3.new(-202, 50, 287),
+			Vector3.new(-97, 62, 276),
+			Vector3.new(-123, 90, 336),
+			Vector3.new(-198, 116, 407),
+			Vector3.new(-161, 139, 513),
+			Vector3.new(-88, 141, 523),
+			Vector3.new(-72, 141, 444),
+		},
+		spawn = {
+			Vector3.new(319, 175, 95),
+			Vector3.new(318, 183, -0),
+			Vector3.new(306, 210, -251),
+			Vector3.new(161, 59, -332),
+			Vector3.new(-29, 59, -371),
+			Vector3.new(-115, 61, -274),
+			Vector3.new(-89, 61, -46),
+			Vector3.new(-180, 58, 33),
+			Vector3.new(-54, 61, 94),
+			Vector3.new(-202, 50, 287),
+		},
+	},
+	["Northern Lands"] = {
+		route = {
+			Vector3.new(-678, 21, 292),
+			Vector3.new(-640, 21, 356),
+			{ pos = Vector3.new(-613, 21, 418), boss = true },
+			Vector3.new(-502, 24, 445),
+			Vector3.new(-395, 27, 417),
+			Vector3.new(-289, 27, 382),
+			{ pos = Vector3.new(-117, 21, 322), boss = true },
+			Vector3.new(19, 21, 225),
+			Vector3.new(93, 24, 206),
+			Vector3.new(107, 21, 271),
+			Vector3.new(241, 21, 217),
+			Vector3.new(373, 19, 173),
+			Vector3.new(391, -58, 167),
+			Vector3.new(430, -58, 75),
+			Vector3.new(458, -58, 101),
+			Vector3.new(533, -58, 142),
+			Vector3.new(478, -56, 215),
+			Vector3.new(466, -58, 292),
+			Vector3.new(542, -30, 268),
+			Vector3.new(597, -15, 215),
+			Vector3.new(614, 15, 134),
+			Vector3.new(634, 17, 89),
+			Vector3.new(679, 17, 72),
+			Vector3.new(781, 17, 36),
+			Vector3.new(920, 66, -8),
+			{ pos = Vector3.new(980, 69, -27), boss = true },
+		},
+		spawn = {
+			Vector3.new(-640, 21, 356),
+			Vector3.new(-395, 27, 417),
+			Vector3.new(-289, 27, 382),
+			Vector3.new(93, 24, 206),
+			Vector3.new(107, 21, 271),
+			Vector3.new(430, -58, 75),
+			Vector3.new(458, -58, 101),
+			Vector3.new(533, -58, 142),
+			Vector3.new(478, -56, 215),
+			Vector3.new(679, 17, 72),
+			Vector3.new(781, 17, 36),
+		},
+	},
+}
+
+local cfg = {
+	enabled = false,
+	speedBoost = true,
+	stopDist = 45,
+	repathInterval = 0.75,
+	retargetInterval = 1.0,
+	castRange = 90,
+	bossGateCast = 80,
+	aimlock = true,
+	autoStart = true,
+	autoReplay = true,
+	skipStuckWaypoints = true,
+	spawnMarkers = false,
+	waitOnSkills = true,
+	bossGateRadius = 80,
+	dropWaitMax = 30,
+	dropPickDelay = 3,
+	autoSave = true,
+	highlight = true,
+	showLog = false,
+}
+
+-- Реестр скиллов (кд по имени Tool'а; для GUI-слайдеров и конфига).
+-- Стреляют ВСЕ Tool'ы с abilityEvent (включая два слота Geyser одновременно).
+local SKILLS = {
+	{ name = "Geyser",          cd = 6.5 },
+	{ name = "Chain Lightning", cd = 4 },
+	{ name = "Life Dash",       cd = 4 },
+}
+
+local bot = {
+	state = "IDLE",
+	target = nil,
+	enemies = {},
+	nextRetargetAt = 0,
+	pathMode = "none",
+	pathWaypoints = nil,
+	wpIndex = 0,
+	pathComputing = false,
+	lastRepath = 0,
+	pathTargetPos = nil,
+	stuckTime = 0,
+	lastStuckCheck = 0,
+	waitUntil = nil,
+	currentDungeon = nil,
+	routeIndex = 1,
+	routeDone = false,
+	routeLastWp = nil,
+	routeLastDist = nil,
+	routeProgressAt = 0,
+	fallbackPos = nil,
+	nextAcquireAt = 0,
+	lastRoutePrefLog = 0,
+	started = false,
+	lastStartFire = 0,
+	startFireCount = 0,
+	inDungeonAt = nil,
+	startedPrev = nil,
+	lastReplayFire = 0,
+	replayStage = nil,
+	replayStageAt = 0,
+	pathComputeStart = 0,
+	castTarget = nil,
+	bodyLocked = false,
+	posStuckPos = nil,
+	posStuckAt = 0,
+	posStuckTime = 0,
+	posStuckJumped = false,
+}
+
+local function rand(a, b)
+	return a + math.random() * (b - a)
+end
+
+local hudGui, infoLabel, routeLabel, logLabel, logFrame, highlight
+
+local logLines = {}
+
+local function log(text)
+	table.insert(logLines, ("[%s] %s"):format(os.date("%H:%M:%S"), tostring(text)))
+	while #logLines > LOG_LINES do
+		table.remove(logLines, 1)
+	end
+	if logLabel then
+		logLabel.Text = table.concat(logLines, "\n")
+	end
+end
+
+-- == Сохранение конфига (файл DungeonBot/config.json в папке executor'а) ==
+
+local CONFIG_FILE = "DungeonBot/config.json"
+local CONFIG_VERSION = 2
+
+local function saveConfig()
+	if writefile == nil then
+		log("config save: writefile unavailable in this executor")
+		return false
+	end
+	pcall(function()
+		makefolder("DungeonBot")
+	end)
+	local data = {}
+	for key, value in pairs(cfg) do
+		if type(value) == "boolean" or type(value) == "number" then
+			data[key] = value
+		end
+	end
+	data.configVersion = CONFIG_VERSION
+	if bot.currentDungeon ~= nil then
+		data.dungeon = bot.currentDungeon
+	end
+	if SKILLS ~= nil then
+		local skills = {}
+		for i, skill in ipairs(SKILLS) do
+			table.insert(skills, { name = skill.name, cd = skill.cd })
+		end
+		data.skills = skills
+	end
+	local ok = pcall(function()
+		writefile(CONFIG_FILE, game:GetService("HttpService"):JSONEncode(data))
+	end)
+	if ok then
+		log("config saved: " .. CONFIG_FILE)
+	else
+		log("config save: failed")
+	end
+	return ok
+end
+
+local saveQueued = false
+local function scheduleSave()
+	if not cfg.autoSave then
+		return
+	end
+	if saveQueued then
+		return
+	end
+	saveQueued = true
+	task.delay(1, function()
+		saveQueued = false
+		saveConfig()
+	end)
+end
+
+local function applyConfigData(data)
+	if type(data) ~= "table" then
+		return 0
+	end
+	local applied = 0
+	local oldConfig = data.configVersion ~= CONFIG_VERSION
+	for key, value in pairs(data) do
+		if key ~= "dungeon" and key ~= "configVersion" and cfg[key] ~= nil and type(cfg[key]) == type(value) then
+			-- Старый конфиг (без версии): castRange не восстанавливаем — пусть
+			-- применится новый дефолт (90); остальное восстанавливаем как есть.
+			if not (oldConfig and key == "castRange") then
+				cfg[key] = value
+				applied += 1
+			end
+		end
+	end
+	local dungeon = data.dungeon
+	if type(dungeon) == "string" and DUNGEONS[dungeon] ~= nil then
+		bot.currentDungeon = dungeon
+		bot.routeIndex = 1
+		bot.routeDone = false
+		bot.routeLastWp = nil
+		bot.routeLastDist = nil
+		applied += 1
+		log("config: dungeon -> " .. dungeon)
+	end
+	if type(data.skills) == "table" then
+		for _, saved in ipairs(data.skills) do
+			if type(saved) == "table" and type(saved.name) == "string" then
+				for _, skill in ipairs(SKILLS) do
+					if skill.name == saved.name and type(saved.cd) == "number" then
+						skill.cd = saved.cd
+						applied += 1
+						break
+					end
+				end
+			end
+		end
+	end
+	return applied
+end
+
+local function loadConfig()
+	if isfile == nil or readfile == nil then
+		log("config load: file api unavailable")
+		return false
+	end
+	local ok, result = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_FILE))
+	end)
+	if not ok or type(result) ~= "table" then
+		return false
+	end
+	local applied = applyConfigData(result)
+	log(("config loaded: %d settings applied"):format(applied))
+	return true
+end
+
+local function buildHud()
+	hudGui = Instance.new("ScreenGui")
+	hudGui.Name = "DungeonBotHUD"
+	hudGui.ResetOnSpawn = false
+	hudGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+	infoLabel = Instance.new("TextLabel")
+	infoLabel.Size = UDim2.fromOffset(420, 20)
+	infoLabel.Position = UDim2.fromOffset(10, 10)
+	infoLabel.BackgroundTransparency = 0.35
+	infoLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+	infoLabel.TextColor3 = Color3.fromRGB(235, 235, 235)
+	infoLabel.Font = Enum.Font.Code
+	infoLabel.TextSize = 13
+	infoLabel.Text = "DungeonBot: off"
+	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+	infoLabel.Parent = hudGui
+
+	routeLabel = Instance.new("TextLabel")
+	routeLabel.Size = UDim2.fromOffset(420, 18)
+	routeLabel.Position = UDim2.fromOffset(10, 32)
+	routeLabel.BackgroundTransparency = 0.35
+	routeLabel.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+	routeLabel.TextColor3 = Color3.fromRGB(160, 180, 200)
+	routeLabel.Font = Enum.Font.Code
+	routeLabel.TextSize = 12
+	routeLabel.Text = "route: none (select dungeon)"
+	routeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	routeLabel.Parent = hudGui
+
+	logFrame = Instance.new("Frame")
+	logFrame.Size = UDim2.fromOffset(420, 150)
+	logFrame.Position = UDim2.new(0, 10, 1, -170)
+	logFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+	logFrame.BackgroundTransparency = 0.25
+	logFrame.BorderSizePixel = 0
+	logFrame.Visible = cfg.showLog
+	logFrame.Parent = hudGui
+
+	logLabel = Instance.new("TextLabel")
+	logLabel.Size = UDim2.new(1, -10, 1, -10)
+	logLabel.Position = UDim2.fromOffset(5, 5)
+	logLabel.BackgroundTransparency = 1
+	logLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
+	logLabel.Font = Enum.Font.Code
+	logLabel.TextSize = 12
+	logLabel.Text = ""
+	logLabel.TextXAlignment = Enum.TextXAlignment.Left
+	logLabel.TextYAlignment = Enum.TextYAlignment.Top
+	logLabel.TextWrapped = true
+	logLabel.Parent = logFrame
+end
+
+local function getCharParts()
+	local character = LocalPlayer.Character
+	if character == nil then
+		return nil, nil
+	end
+	local hrp = character:FindFirstChild("HumanoidRootPart")
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	return hrp, humanoid
+end
+
+local function isEnemyModel(model)
+	if typeof(model) ~= "Instance" or not model:IsA("Model") then
+		return false
+	end
+	if Players:GetPlayerFromCharacter(model) ~= nil then
+		return false
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid == nil or humanoid.Health <= 0 then
+		return false
+	end
+	for _, sig in ipairs(ENEMY_SIGS) do
+		if model:FindFirstChild(sig, true) ~= nil then
+			return true
+		end
+	end
+	return false
+end
+
+local function tryRegister(inst)
+	if isEnemyModel(inst) then
+		if not bot.enemies[inst] then
+			bot.enemies[inst] = true
+		end
+	end
+end
+
+local function scanContainer(container, depth)
+	for _, child in ipairs(container:GetChildren()) do
+		if child:IsA("Model") then
+			tryRegister(child)
+		end
+		if depth < 4 and (child:IsA("Folder") or child:IsA("Model")) then
+			scanContainer(child, depth + 1)
+		end
+	end
+end
+
+local function rescanAll()
+	scanContainer(workspace, 0)
+	local count = 0
+	for _ in pairs(bot.enemies) do
+		count += 1
+	end
+	log(("scan: %d enemies tracked"):format(count))
+end
+
+workspace.DescendantAdded:Connect(function(inst)
+	if inst:IsA("Model") then
+		task.delay(0.3, function()
+			tryRegister(inst)
+		end)
+	end
+end)
+
+local function getRoot(model)
+	if model == nil then
+		return nil
+	end
+	local root = model.PrimaryPart
+	if root == nil then
+		root = model:FindFirstChild("HumanoidRootPart")
+	end
+	if root == nil then
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if humanoid ~= nil then
+			root = humanoid.RootPart
+		end
+	end
+	return root
+end
+
+local function validateEnemies()
+	local now = os.clock()
+	local toRemove = {}
+	for model in pairs(bot.enemies) do
+		if not model:IsDescendantOf(workspace) then
+			table.insert(toRemove, model)
+		else
+			local humanoid = model:FindFirstChildOfClass("Humanoid")
+			if humanoid == nil or humanoid.Health <= 0 then
+				table.insert(toRemove, model)
+			end
+		end
+	end
+	for _, model in ipairs(toRemove) do
+		bot.enemies[model] = nil
+		if bot.target == model then
+			bot.target = nil
+			bot.nextRetargetAt = now + rand(0.15, 0.4)
+			log("target died/removed: " .. model.Name)
+		end
+	end
+end
+
+local function makeLosParams(targetModel)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local exclude = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player.Character ~= nil then
+			table.insert(exclude, player.Character)
+		end
+	end
+	for model in pairs(bot.enemies) do
+		table.insert(exclude, model)
+	end
+	if targetModel ~= nil then
+		table.insert(exclude, targetModel)
+	end
+	params.FilterDescendantsInstances = exclude
+	params.IgnoreWater = true
+	params.RespectCanCollide = true
+	return params
+end
+
+-- LOS с учётом невидимых барьеров: рейкаст блокируется только реальными
+-- коллайдерами (RespectCanCollide, декор пролетает насквозь), плюс второй
+-- луч на «уровне колена» ловит низкие препятствия под верхним лучом.
+local function hasLOS(from, to, targetModel)
+	local params = makeLosParams(targetModel)
+	if workspace:Raycast(from, to - from, params) ~= nil then
+		return false
+	end
+	local low = from + Vector3.new(0, -LOS_KNEE_DROP, 0)
+	return workspace:Raycast(low, to - low, params) == nil
+end
+
+local function pickTarget()
+	local hrp = bot.hrp
+	if hrp == nil then
+		return nil, nil
+	end
+	local best, bestScore = nil, math.huge
+	for model in pairs(bot.enemies) do
+		local root = getRoot(model)
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if root ~= nil and humanoid ~= nil and humanoid.Health > 0 then
+			local score = (root.Position - hrp.Position).Magnitude
+			if not hasLOS(hrp.Position, root.Position, model) then
+				score += LOS_PENALTY
+			end
+			if score < bestScore then
+				best, bestScore = model, score
+			end
+		else
+			bot.enemies[model] = nil
+		end
+	end
+	return best, bestScore
+end
+
+local function getRoute(dungeonName)
+	if dungeonName == nil then
+		return nil
+	end
+	local data = DUNGEONS[dungeonName]
+	return data ~= nil and data.route or nil
+end
+
+-- Живые враги в радиусе radius от позиции (для босс-гейтов Northern Lands).
+local function countEnemiesNear(pos, radius)
+	local count = 0
+	for model in pairs(bot.enemies) do
+		local root = getRoot(model)
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if root ~= nil and humanoid ~= nil and humanoid.Health > 0 then
+			if (root.Position - pos).Magnitude <= radius then
+				count += 1
+			end
+		end
+	end
+	return count
+end
+
+-- Вейпоинт может быть Vector3 или {pos=Vector3, boss=true} (босс-гейт).
+local function wpInfo(wp)
+	if typeof(wp) == "Vector3" then
+		return wp, false
+	end
+	if type(wp) == "table" then
+		return wp.pos, wp.boss == true
+	end
+	return nil, false
+end
+
+local function currentWaypoint()
+	local wps = getRoute(bot.currentDungeon)
+	if wps == nil or bot.routeIndex > #wps then
+		return nil
+	end
+	local pos, isBoss = wpInfo(wps[bot.routeIndex])
+	return pos, isBoss
+end
+
+-- Маркеры спавн-точек текущего данжа (Debug): полупрозрачные шары с биллбордом.
+local spawnMarkers = {}
+
+local function setSpawnMarkers(on)
+	for _, marker in ipairs(spawnMarkers) do
+		marker:Destroy()
+	end
+	spawnMarkers = {}
+	if not on then
+		return
+	end
+	local data = bot.currentDungeon ~= nil and DUNGEONS[bot.currentDungeon] or nil
+	local spawns = data ~= nil and data.spawn or nil
+	if spawns == nil then
+		return
+	end
+	for i, pos in ipairs(spawns) do
+		local part = Instance.new("Part")
+		part.Name = "DBotSpawnMarker"
+		part.Shape = Enum.PartType.Ball
+		part.Size = Vector3.new(3, 3, 3)
+		part.Position = pos
+		part.Anchored = true
+		part.CanCollide = false
+		part.CanQuery = false
+		part.CanTouch = false
+		part.Color = Color3.fromRGB(120, 220, 255)
+		part.Material = Enum.Material.Neon
+		part.Transparency = 0.4
+		local billboard = Instance.new("BillboardGui")
+		billboard.Size = UDim2.fromOffset(90, 24)
+		billboard.AlwaysOnTop = true
+		billboard.Parent = part
+		local label = Instance.new("TextLabel")
+		label.Size = UDim2.new(1, 0, 1, 0)
+		label.BackgroundTransparency = 1
+		label.Text = "spawn " .. i
+		label.TextColor3 = Color3.fromRGB(120, 220, 255)
+		label.Font = Enum.Font.Code
+		label.TextSize = 13
+		label.Parent = billboard
+		part.Parent = workspace
+		table.insert(spawnMarkers, part)
+	end
+	log(("spawn markers: %d"):format(#spawnMarkers))
+end
+
+local function applyHighlight()
+	if highlight == nil then
+		return
+	end
+	if cfg.highlight and cfg.enabled and bot.target ~= nil and bot.target.Parent ~= nil then
+		highlight.Adornee = nil
+		highlight.Parent = bot.target
+	else
+		highlight.Parent = nil
+	end
+end
+
+local function stopMovement()
+	local hrp, humanoid = getCharParts()
+	if hrp ~= nil and humanoid ~= nil then
+		humanoid:MoveTo(hrp.Position)
+	end
+end
+
+local function resetPathState()
+	bot.pathMode = "none"
+	bot.pathWaypoints = nil
+	bot.wpIndex = 0
+	bot.pathTargetPos = nil
+	bot.lastRepath = 0
+	bot.stuckTime = 0
+end
+
+local function setEnabled(value)
+	cfg.enabled = value
+	if value then
+		log("bot ON")
+		resetPathState()
+		bot.target = nil
+		local hrp, humanoid = getCharParts()
+		if hrp ~= nil and humanoid ~= nil and cfg.speedBoost then
+			humanoid.WalkSpeed = SPEED_BOOST
+		end
+	else
+		log("bot OFF")
+		stopMovement()
+		bot.target = nil
+		bot.waitUntil = nil
+		local _, humanoid = getCharParts()
+		if humanoid ~= nil then
+			humanoid.WalkSpeed = SPEED_NORMAL
+		end
+	end
+	applyHighlight()
+end
+
+local function setTarget(model, reason)
+	if bot.target == model then
+		return
+	end
+	bot.target = model
+	resetPathState()
+	applyHighlight()
+	if model ~= nil then
+		log(("target: %s (%s)"):format(model.Name, reason or "?"))
+	else
+		log("target: none (" .. tostring(reason) .. ")")
+	end
+end
+
+local function targetScore(model, hrp)
+	local root = getRoot(model)
+	if root == nil then
+		return nil
+	end
+	local score = (root.Position - hrp.Position).Magnitude
+	if not hasLOS(hrp.Position, root.Position, model) then
+		score += LOS_PENALTY
+	end
+	return score
+end
+
+-- Ретаргет каждые cfg.retargetInterval: меняем цель, только если новый моб
+-- ближе текущего более чем на HYSTERESIS (20%) — без пинг-понга между мобами
+-- на равной дистанции. Моб за барьером (LOS заблокирован) = +30 studs штрафа.
+local function retargetTick()
+	if not cfg.enabled or bot.target == nil then
+		return
+	end
+	local hrp = bot.hrp
+	if hrp == nil then
+		return
+	end
+	local model = bot.target
+	if not model:IsDescendantOf(workspace) then
+		setTarget(nil, "gone")
+		return
+	end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if humanoid == nil or humanoid.Health <= 0 then
+		setTarget(nil, "died")
+		return
+	end
+	local current = targetScore(model, hrp)
+	if current == nil then
+		setTarget(nil, "no-root")
+		return
+	end
+	local best, bestScore = pickTarget()
+	if best ~= nil and best ~= model and bestScore < current * (1 - HYSTERESIS) then
+		setTarget(best, "closer")
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(math.max(cfg.retargetInterval * rand(0.85, 1.15), 0.1))
+		retargetTick()
+	end
+end)
+
+-- == Скиллы через abilityEvent ремоуты Tool'ов (Backpack/Character) ==
+-- Как в игре: Backpack["Geyser"].abilityEvent:FireServer() и т.д.
+-- Per-skill кд: у каждого скилла свой кулдаун; юзаются только «одетые»
+-- (Tool найден в Backpack/Character), отсутствующие тихо скипаются.
+-- (SKILLS объявлен выше, у cfg — его видит сохранение конфига.)
+
+local DEFAULT_SKILL_CD = 6.5
+
+local skillState = {}
+
+local function skillCdFor(toolName)
+	for _, skill in ipairs(SKILLS) do
+		if skill.name == toolName then
+			return skill.cd
+		end
+	end
+	return DEFAULT_SKILL_CD
+end
+
+-- Перечисляем ВСЕ Tool'ы с abilityEvent (Backpack + Character): два слота
+-- Geyser (Northern Lands) жгутся ОДНОВРЕМЕННО — каждый своим ремоутом.
+-- Кулдаун-стейт по инстансу ремоута — одноимённые скиллы независимы.
+local function getEquippedAbilities()
+	local list = {}
+	local character = LocalPlayer.Character
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	for _, container in ipairs({ backpack, character }) do
+		if container ~= nil then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") then
+					local ev = tool:FindFirstChild("abilityEvent")
+					if ev ~= nil and ev:IsA("RemoteEvent") then
+						table.insert(list, { tool = tool, ev = ev })
+					end
+				end
+			end
+		end
+	end
+	return list
+end
+
+-- Скиллы: жгём ВСЕ equipped Tool'ы с abilityEvent (2 слота Geyser — одновременно).
+-- Каждому — свой кд (ровно, без рандома). Если что-то прожалось и включён
+-- waitOnSkills -> фиксированный таймер: стоим ровно кд от момента каста.
+local function fireSkills(now, targetName)
+	local equipped = getEquippedAbilities()
+	local fired = false
+	local maxReady = 0
+	for _, entry in ipairs(equipped) do
+		local ev = entry.ev
+		local st = skillState[ev]
+		if st == nil then
+			st = { ready = 0, cd = skillCdFor(entry.tool.Name) }
+			skillState[ev] = st
+		end
+		if now >= st.ready then
+			local ok = pcall(function()
+				ev:FireServer()
+			end)
+			if ok then
+				st.ready = now + st.cd
+				fired = true
+				maxReady = math.max(maxReady, st.ready)
+				log(("skill: %s (%.1fs cd) -> %s"):format(entry.tool.Name, st.cd, targetName or (bot.target and bot.target.Name) or "?"))
+			else
+				st.ready = now + 1
+			end
+		end
+	end
+	for ev in pairs(skillState) do
+		if ev.Parent == nil then
+			skillState[ev] = nil
+		end
+	end
+	-- Фиксированное ожидание: ровно кд от момента каста (без продлений
+	-- посреди ожидания). Оба гейзера брошены -> стоим 6.5с -> бежим.
+	if fired and cfg.waitOnSkills and (bot.waitUntil == nil or now >= bot.waitUntil) then
+		bot.waitUntil = maxReady
+		log(("wait: skills fired, standing %.1fs"):format(maxReady - now))
+	end
+end
+
+-- == Ranged-каст (castRange studs, без LOS) + аимлок ==
+
+-- Радиус каста: обычный — castRange (90); на босс-гейте — bossGateCast
+-- (отдельный ползунок), чтобы не дергать босса раньше подхода к гейт-точке.
+local function effectiveCastRange()
+	local wps = getRoute(bot.currentDungeon)
+	if wps ~= nil and bot.routeIndex <= #wps then
+		local _, isBoss = wpInfo(wps[bot.routeIndex])
+		if isBoss then
+			return cfg.bossGateCast
+		end
+	end
+	return cfg.castRange
+end
+
+local function findCastTarget(hrp)
+	local castRange = effectiveCastRange()
+	if castRange <= 0 then
+		return nil
+	end
+	local best, bestDist = nil, math.huge
+	for model in pairs(bot.enemies) do
+		local root = getRoot(model)
+		local humanoid = model:FindFirstChildOfClass("Humanoid")
+		if root ~= nil and humanoid ~= nil and humanoid.Health > 0 then
+			local d = (root.Position - hrp.Position).Magnitude
+			if d < bestDist then
+				best, bestDist = model, d
+			end
+		end
+	end
+	if best == nil or bestDist > castRange then
+		return nil
+	end
+	return best
+end
+
+local function castTargetRoot()
+	local model = bot.castTarget
+	if model == nil or not model:IsDescendantOf(workspace) then
+		return nil
+	end
+	local root = getRoot(model)
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	if root == nil or humanoid == nil or humanoid.Health <= 0 then
+		return nil
+	end
+	return root
+end
+
+-- Аимлок ТОЛЬКО ТЕЛОМ (камеру не трогаем — игра без шифтлока): персонаж
+-- доворачивается к цели каста через faceTarget с временным AutoRotate=false.
+-- Камера полностью под управлением игрока/игры.
+
+local function computePathAsync(hrp, goalPos)
+	bot.pathComputing = true
+	bot.pathComputeStart = os.clock()
+	local startPos = hrp.Position
+	task.spawn(function()
+		local path = PathfindingService:CreatePath({
+			AgentRadius = 2,
+			AgentHeight = 5,
+			AgentCanJump = true,
+		})
+		local ok = pcall(function()
+			path:ComputeAsync(startPos, goalPos)
+		end)
+		bot.pathComputing = false
+		if not ok or path.Status ~= Enum.PathStatus.Success then
+			bot.pathMode = "direct"
+			bot.lastRepath = os.clock()
+			return
+		end
+		local waypoints = path:GetWaypoints()
+		if #waypoints < 2 then
+			bot.pathMode = "direct"
+			return
+		end
+		bot.pathWaypoints = waypoints
+		bot.wpIndex = 2
+		bot.pathMode = "path"
+		bot.pathTargetPos = goalPos
+		bot.lastRepath = os.clock()
+	end)
+end
+
+local function followPath(hum, hrp)
+	if bot.pathMode ~= "path" or bot.pathWaypoints == nil then
+		if bot.pathMode == "computing" then
+			if bot.fallbackPos ~= nil then
+				hum:MoveTo(bot.fallbackPos)
+			end
+			return
+		end
+		local root = bot.target ~= nil and getRoot(bot.target) or nil
+		local fallback = root ~= nil and root.Position or bot.fallbackPos
+		if fallback ~= nil then
+			hum:MoveTo(fallback)
+		end
+		return
+	end
+	local wp = bot.pathWaypoints[bot.wpIndex]
+	while wp ~= nil and (wp.Position - hrp.Position).Magnitude < ARRIVE_EPS do
+		bot.wpIndex += 1
+		wp = bot.pathWaypoints[bot.wpIndex]
+	end
+	if wp == nil then
+		bot.pathMode = "direct"
+		return
+	end
+	if wp.Action == Enum.PathWaypointAction.Jump then
+		hum.Jump = true
+	end
+	hum:MoveTo(wp.Position)
+end
+
+local function stuckCheck(hum, hrp, now)
+	if now - bot.lastStuckCheck < 0.25 then
+		return
+	end
+	bot.lastStuckCheck = now
+	local velocity = hrp.AssemblyLinearVelocity
+	local speed = Vector3.new(velocity.X, 0, velocity.Z).Magnitude
+	if (bot.state == "CHASE" or bot.state == "ROUTE") and speed < 1.5 then
+		bot.stuckTime += 0.25
+		if bot.stuckTime > 1.2 and now - (bot.lastJumpAt or 0) > 1.5 then
+			hum.Jump = true
+			bot.lastJumpAt = now
+			log("unstuck: jump")
+		end
+		if bot.stuckTime > 4 then
+			resetPathState()
+			bot.pathMode = "direct"
+			log("unstuck: force repath")
+			bot.stuckTime = 0
+		end
+	else
+		bot.stuckTime = 0
+	end
+end
+
+local function moveToPosition(hum, hrp, targetPos, now, targetModel)
+	bot.fallbackPos = targetPos
+	if hasLOS(hrp.Position, targetPos, targetModel) then
+		if bot.pathMode ~= "direct" then
+			log("checkpoint: LOS clear -> direct MoveTo")
+		end
+		bot.pathMode = "direct"
+		bot.pathWaypoints = nil
+		hum:MoveTo(targetPos)
+	else
+		local cooldown = bot.pathMode == "path" and cfg.repathInterval or 0.5
+		local needPath = now - bot.lastRepath > cooldown
+			or (bot.pathMode == "path"
+				and (targetPos - (bot.pathTargetPos or targetPos)).Magnitude > TARGET_DRIFT)
+		if needPath and not bot.pathComputing then
+			bot.pathMode = "computing"
+			computePathAsync(hrp, targetPos)
+		end
+		followPath(hum, hrp)
+	end
+	stuckCheck(hum, hrp, now)
+end
+
+local function moveToward(hum, hrp, root, now)
+	moveToPosition(hum, hrp, root.Position, now, bot.target)
+end
+
+local function faceTarget(hrp, targetPos, deltaTime)
+	local desired = CFrame.lookAt(
+		hrp.Position,
+		Vector3.new(targetPos.X, hrp.Position.Y, targetPos.Z)
+	)
+	local alpha = math.min(deltaTime * 8, 1)
+	hrp.CFrame = hrp.CFrame:Lerp(desired, alpha)
+end
+
+local lastInfoUpdate = 0
+local function updateInfo(now)
+	if now - lastInfoUpdate < 0.2 or infoLabel == nil then
+		return
+	end
+	lastInfoUpdate = now
+	local targetText = "none"
+	local distText = "-"
+	if bot.target ~= nil and bot.target.Parent ~= nil then
+		local root = getRoot(bot.target)
+		local humanoid = bot.target:FindFirstChildOfClass("Humanoid")
+		local hp = humanoid and math.floor(humanoid.Health / math.max(humanoid.MaxHealth, 1) * 100) or 0
+		targetText = ("%s (%d%%)"):format(bot.target.Name, hp)
+		if root ~= nil and bot.hrp ~= nil then
+			distText = ("%.1f"):format((root.Position - bot.hrp.Position).Magnitude)
+		end
+	end
+	local count = 0
+	for _ in pairs(bot.enemies) do
+		count += 1
+	end
+	local waitText = "-"
+	if bot.waitUntil ~= nil then
+		waitText = ("%.0fs"):format(math.max(bot.waitUntil - os.clock(), 0))
+	end
+	-- Индикация фактической скорости: пока бот+буст включены, ожидаем 20;
+	-- если игра сбросила — «spd16!» (с восклицанием) до восстановления тиком.
+	local speedText = cfg.speedBoost and "spd20" or "spd16"
+	if cfg.enabled and cfg.speedBoost then
+		local _, hum = getCharParts()
+		if hum ~= nil and hum.Health > 0 then
+			speedText = ("spd%d%s"):format(
+				math.floor(hum.WalkSpeed + 0.5),
+				hum.WalkSpeed ~= SPEED_BOOST and "!" or ""
+			)
+		end
+	end
+	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d | wait: %s"):format(
+		cfg.enabled and bot.state or "off",
+		speedText,
+		targetText,
+		distText,
+		count,
+		waitText
+	)
+	if routeLabel ~= nil then
+		local wpCount = #getRoute(bot.currentDungeon) or 0
+		if wpCount > 0 then
+			routeLabel.Text = ("route: %s | wp: %d/%d | %s"):format(
+				bot.currentDungeon,
+				math.min(bot.routeIndex, wpCount),
+				wpCount,
+				bot.routeDone and "complete"
+					or (bot.state == "ROUTE" and "moving"
+					or (bot.state == "GATE_HOLD" and "boss gate"
+					or (bot.state == "WAIT_SKILLS" and "skills" or "waiting")))
+			)
+			routeLabel.TextColor3 = (bot.state == "ROUTE" or bot.state == "GATE_HOLD") and Color3.fromRGB(255, 220, 120) or Color3.fromRGB(160, 180, 200)
+		else
+			routeLabel.Text = "route: none (select dungeon)"
+		end
+	end
+end
+
+RunService.Heartbeat:Connect(function(deltaTime)
+	local now = os.clock()
+	if not cfg.enabled then
+		updateInfo(now)
+		return
+	end
+	local hrp, humanoid = getCharParts()
+	bot.hrp = hrp
+	if hrp == nil or humanoid == nil or humanoid.Health <= 0 then
+		if bot.state ~= "DEAD" then
+			bot.state = "DEAD"
+			bot.waitUntil = nil
+			log("character dead, waiting respawn")
+		end
+		return
+	end
+
+	-- Ranged-каст на ходу: моб в радиусе каста (обычный 90, босс-гейт 80;
+	-- LOS не нужен — боссы за барьерами). Аимлок телом.
+	bot.castTarget = nil
+	if effectiveCastRange() > 0 then
+		local castTarget = findCastTarget(hrp)
+		if castTarget ~= nil then
+			bot.castTarget = castTarget
+			local cRoot = castTargetRoot()
+			if cRoot ~= nil then
+				if cfg.aimlock and bot.state ~= "IN_RANGE" then
+					if not bot.bodyLocked and humanoid.AutoRotate then
+						humanoid.AutoRotate = false
+						bot.bodyLocked = true
+					end
+					faceTarget(hrp, cRoot.Position, deltaTime)
+				end
+				if bot.state ~= "IN_RANGE" and bot.state ~= "WAIT_SKILLS" then
+					fireSkills(now, castTarget.Name)
+				end
+			end
+		end
+	end
+	if bot.bodyLocked and (bot.castTarget == nil or bot.state == "IN_RANGE" or not cfg.aimlock or not cfg.enabled) then
+		if humanoid.AutoRotate == false then
+			humanoid.AutoRotate = true
+		end
+		bot.bodyLocked = false
+	end
+
+	-- WAIT_SKILLS: скиллы прожались -> стоим РОВНО кд от момента каста
+	-- (безусловное ожидание по таймеру: моб умер — всё равно досиживаем),
+	-- лицом к цели, если она жива -> таймер истёк -> бежим дальше.
+	if cfg.waitOnSkills and bot.waitUntil ~= nil then
+		if now < bot.waitUntil then
+			if bot.state ~= "WAIT_SKILLS" then
+				resetPathState()
+				log(("wait: holding position %.1fs"):format(bot.waitUntil - now))
+			end
+			bot.state = "WAIT_SKILLS"
+			humanoid:MoveTo(hrp.Position)
+			local facePos = nil
+			local cRoot = castTargetRoot()
+			if cRoot ~= nil then
+				facePos = cRoot.Position
+			elseif bot.target ~= nil then
+				local tRoot = getRoot(bot.target)
+				if tRoot ~= nil then
+					facePos = tRoot.Position
+				end
+			end
+			if facePos ~= nil then
+				if not bot.bodyLocked and humanoid.AutoRotate then
+					humanoid.AutoRotate = false
+					bot.bodyLocked = true
+				end
+				faceTarget(hrp, facePos, deltaTime)
+			end
+			updateInfo(now)
+			return
+		else
+			bot.waitUntil = nil
+		end
+	end
+
+	if bot.target == nil or not bot.target:IsDescendantOf(workspace) then
+		if bot.target ~= nil then
+			log("target lost: " .. bot.target.Name)
+			bot.target = nil
+			bot.nextRetargetAt = now + rand(0.15, 0.4)
+		end
+		if now >= bot.nextRetargetAt and now >= bot.nextAcquireAt then
+			local best, bestScore = pickTarget()
+			if best ~= nil then
+				local engage
+				local castRange = effectiveCastRange()
+				if castRange > 0 then
+					-- Моб в радиусе каста (обычный 90 / босс-гейт 80) ->
+					-- перестраиваемся на него и подбегаем; LOS-штраф в score
+					-- удержит от погони за мобом за барьером.
+					engage = bestScore < castRange
+				else
+					local wp = currentWaypoint()
+					local wpDist = wp ~= nil and (wp - hrp.Position).Magnitude or nil
+					engage = wpDist == nil or bestScore < wpDist - ENGAGE_MARGIN
+				end
+				if engage then
+					setTarget(best, "acquire")
+				else
+					bot.nextAcquireAt = now + 0.5
+					if now - bot.lastRoutePrefLog > 5 then
+						bot.lastRoutePrefLog = now
+						log(("route: mob (%.1f) out of cast range -> keep route"):format(bestScore))
+					end
+				end
+			end
+		end
+		if bot.target == nil then
+			local waypoints = getRoute(bot.currentDungeon)
+			if waypoints ~= nil and bot.routeIndex <= #waypoints then
+				local wpPos, isBoss = wpInfo(waypoints[bot.routeIndex])
+				local dist = (wpPos - hrp.Position).Magnitude
+
+				-- Босс-гейт: точка не засчитывается, пока в bossGateRadius от неё
+				-- есть живой враг. Смерть не сбрасывает routeIndex — после респавна
+				-- бот сам возвращается к этой точке и дерётся, пока гейт закрыт.
+				if isBoss and dist < cfg.bossGateRadius and countEnemiesNear(wpPos, cfg.bossGateRadius) > 0 then
+					if bot.state ~= "ROUTE" and bot.state ~= "GATE_HOLD" then
+						log(("boss gate: enemies at wp %d/%d, holding"):format(bot.routeIndex, #waypoints))
+					end
+					bot.state = "GATE_HOLD"
+					bot.routeDone = false
+					bot.routeProgressAt = now
+					bot.routeLastWp = nil
+					bot.routeLastDist = nil
+					moveToPosition(humanoid, hrp, wpPos, now, nil)
+					updateInfo(now)
+					return
+				end
+
+				if bot.state ~= "ROUTE" then
+					bot.state = "ROUTE"
+					bot.routeDone = false
+					resetPathState()
+					-- Сброс таймера застревания: бой длился дольше лимита —
+					-- отсчёт «нет прогресса» стартует заново, не с до-боевого момента.
+					bot.routeLastWp = nil
+					bot.routeLastDist = nil
+					log(("route: heading to waypoint %d/%d"):format(bot.routeIndex, #waypoints))
+				end
+				if dist < ROUTE_ARRIVE then
+					if isBoss then
+						log(("boss gate: cleared, advancing from wp %d/%d"):format(bot.routeIndex, #waypoints))
+					else
+						log(("route: waypoint %d/%d reached"):format(bot.routeIndex, #waypoints))
+					end
+					bot.routeIndex += 1
+					bot.routeLastWp = nil
+					bot.routeLastDist = nil
+					resetPathState()
+				else
+					if bot.routeLastWp ~= bot.routeIndex then
+						bot.routeLastWp = bot.routeIndex
+						bot.routeLastDist = dist
+						bot.routeProgressAt = now
+					elseif dist < bot.routeLastDist - 0.5 then
+						bot.routeLastDist = dist
+						bot.routeProgressAt = now
+					elseif cfg.skipStuckWaypoints and now - bot.routeProgressAt > ROUTE_STUCK_SKIP then
+						log(("route: waypoint %d no progress, skipping"):format(bot.routeIndex))
+						bot.routeIndex += 1
+						bot.routeLastWp = nil
+						bot.routeLastDist = nil
+						resetPathState()
+					elseif not cfg.skipStuckWaypoints and now - bot.routeProgressAt > ROUTE_STUCK_SKIP and now - bot.lastRoutePrefLog > 10 then
+						bot.lastRoutePrefLog = now
+						log(("route: stuck at wp %d (skip disabled)"):format(bot.routeIndex))
+					end
+					if bot.routeLastWp == bot.routeIndex then
+						moveToPosition(humanoid, hrp, wpPos, now, nil)
+					end
+				end
+				updateInfo(now)
+				return
+			end
+			if bot.state ~= "IDLE" then
+				bot.state = "IDLE"
+				stopMovement()
+				if waypoints ~= nil and not bot.routeDone then
+					bot.routeDone = true
+					log("route complete: " .. tostring(bot.currentDungeon))
+				end
+			end
+			updateInfo(now)
+			return
+		end
+	end
+
+	local root = getRoot(bot.target)
+	local targetHumanoid = bot.target:FindFirstChildOfClass("Humanoid")
+	if root == nil or targetHumanoid == nil or targetHumanoid.Health <= 0 then
+		bot.nextRetargetAt = now + rand(0.15, 0.4)
+		setTarget(nil, "died")
+		return
+	end
+
+	local dist = (root.Position - hrp.Position).Magnitude
+
+	-- Останавливаемся только если в пределах дистанции И чистый LOS:
+	-- за барьером продолжаем подходим по пути к мобу вплотную (чекпоинт).
+	if dist > cfg.stopDist or not hasLOS(hrp.Position, root.Position, bot.target) then
+		bot.state = "CHASE"
+		moveToward(humanoid, hrp, root, now)
+	else
+		bot.state = "IN_RANGE"
+		humanoid:MoveTo(hrp.Position)
+		faceTarget(hrp, root.Position, deltaTime)
+		fireSkills(now)
+	end
+	updateInfo(now)
+end)
+
+-- Позиционный детектор застревания: персонаж не двигается вовсе (не «медленно
+-- идёт», а стоит) — сначала прыжок+перепас, затем скип вейпоинта / смена цели.
+local function positionStuckTick()
+	local now = os.clock()
+	if not cfg.enabled
+		or bot.hrp == nil
+		or (bot.state ~= "CHASE" and bot.state ~= "ROUTE" and bot.state ~= "GATE_HOLD") then
+		bot.posStuckPos = nil
+		bot.posStuckTime = 0
+		bot.posStuckJumped = false
+		return
+	end
+	local pos = bot.hrp.Position
+	if bot.posStuckPos == nil then
+		bot.posStuckPos = pos
+		bot.posStuckAt = now
+		return
+	end
+	if now - bot.posStuckAt < 1 then
+		return
+	end
+	local moved = (pos - bot.posStuckPos).Magnitude
+	bot.posStuckPos = pos
+	bot.posStuckAt = now
+	if moved >= POS_STUCK_EPS then
+		bot.posStuckTime = 0
+		bot.posStuckJumped = false
+		return
+	end
+	bot.posStuckTime += 1
+	if bot.posStuckTime >= POS_STUCK_DROP then
+		bot.posStuckTime = 0
+		bot.posStuckJumped = false
+		if bot.state == "ROUTE" then
+			local wps = getRoute(bot.currentDungeon)
+			if cfg.skipStuckWaypoints then
+				log(("unstuck: no movement in ROUTE, skip wp %d/%d"):format(
+					bot.routeIndex, wps ~= nil and #wps or 0))
+				bot.routeIndex += 1
+				bot.routeLastWp = nil
+				bot.routeLastDist = nil
+				resetPathState()
+			else
+				log(("unstuck: no movement at wp %d (skip disabled), retrying"):format(
+					bot.routeIndex))
+				resetPathState()
+			end
+		else
+			log("unstuck: no movement, drop target")
+			setTarget(nil, "stuck")
+			bot.nextRetargetAt = 0
+			resetPathState()
+		end
+	elseif bot.posStuckTime >= POS_STUCK_JUMP and not bot.posStuckJumped then
+		bot.posStuckJumped = true
+		local _, humanoid = getCharParts()
+		if humanoid ~= nil then
+			humanoid.Jump = true
+		end
+		resetPathState()
+		log("unstuck: jump + repath")
+	end
+end
+
+local function computeTimeoutTick()
+	if bot.pathComputing and os.clock() - bot.pathComputeStart > COMPUTE_TIMEOUT then
+		bot.pathComputing = false
+		bot.pathMode = "direct"
+		log("path: compute timeout -> direct")
+	end
+end
+
+-- == Авто-старт / авто-реплей данжа (через ремоуты игры) ==
+
+local function inDungeonNow()
+	local dn = workspace:FindFirstChild("dungeonName")
+	return dn ~= nil and dn:IsA("StringValue")
+end
+
+-- Старт данжа: changeStartValue вызывается БЕЗ аргументов (как игровая кнопка).
+local function fireStartRemote()
+	local remotesFolder = ReplicatedStorage:FindFirstChild("remotes")
+	local remote = remotesFolder and remotesFolder:FindFirstChild("changeStartValue")
+	if not (remote and remote:IsA("RemoteEvent")) then
+		return false, "changeStartValue not found"
+	end
+	local ok, err = pcall(function()
+		remote:FireServer()
+	end)
+	return ok, err
+end
+
+local function autoStartTick()
+	if not cfg.enabled or not cfg.autoStart then
+		return
+	end
+	if not inDungeonNow() then
+		bot.inDungeonAt = nil
+		bot.startFireCount = 0
+		bot.startedPrev = nil
+		bot.replayStage = nil
+		return
+	end
+	local now = os.clock()
+	if bot.inDungeonAt == nil then
+		bot.inDungeonAt = now
+		bot.startFireCount = 0
+		bot.replayStage = nil
+		if bot.routeIndex ~= 1 or bot.routeDone then
+			bot.routeIndex = 1
+			bot.routeDone = false
+			bot.routeLastWp = nil
+			bot.routeLastDist = nil
+			resetPathState()
+			log("dungeon entered: route reset to wp 1")
+		end
+	end
+	local started = workspace:FindFirstChild("dungeonStarted")
+	local startedVal = started ~= nil and started:IsA("BoolValue") and started.Value or nil
+	if bot.startedPrev == false and startedVal == true then
+		log("auto-start: dungeon started")
+	end
+	bot.startedPrev = startedVal
+	if startedVal == true then
+		bot.startFireCount = 0
+		return
+	end
+	if now - bot.inDungeonAt < 2.5 then
+		return
+	end
+	if bot.startFireCount >= 8 then
+		return
+	end
+	if now - bot.lastStartFire < 6 then
+		return
+	end
+	local ok, err = fireStartRemote()
+	bot.lastStartFire = now
+	if ok then
+		bot.startFireCount += 1
+		log(("auto-start: fired changeStartValue (%d)"):format(bot.startFireCount))
+	else
+		log("auto-start: failed: " .. tostring(err))
+	end
+end
+
+-- Копия collectDungeonData() из игрового ReplayDungeonButton: собирает
+-- dungeonName / dungeonProgress / dungeonStarted / hardcore + все ValueBase
+-- из workspace.dungeon и bossRoom — это и есть полезная нагрузка реплея.
+local function collectDungeonData()
+	local data = {}
+	local dn = workspace:FindFirstChild("dungeonName")
+	if dn ~= nil and dn:IsA("StringValue") then
+		data.dungeonName = dn.Value
+	end
+	local dp = workspace:FindFirstChild("dungeonProgress")
+	if dp ~= nil and dp:IsA("StringValue") then
+		data.dungeonProgress = dp.Value
+	end
+	local ds = workspace:FindFirstChild("dungeonStarted")
+	if ds ~= nil and ds:IsA("BoolValue") then
+		data.dungeonStarted = ds.Value
+	end
+	local hc = workspace:FindFirstChild("hardcore")
+	if hc ~= nil and hc:IsA("BoolValue") then
+		data.hardcore = hc.Value
+		data.isHardcore = hc.Value
+	end
+	local dungeon = workspace:FindFirstChild("dungeon")
+	if dungeon ~= nil then
+		for _, child in ipairs(dungeon:GetChildren()) do
+			if child:IsA("ValueBase") then
+				data[child.Name] = child.Value
+			end
+		end
+		local bossRoom = dungeon:FindFirstChild("bossRoom")
+		if bossRoom ~= nil then
+			for _, child in ipairs(bossRoom:GetChildren()) do
+				if child:IsA("ValueBase") then
+					data[child.Name] = child.Value
+				end
+			end
+		end
+	end
+	return data
+end
+
+local function isRunFinished()
+	local dungeon = workspace:FindFirstChild("dungeon")
+	if dungeon ~= nil then
+		local bossRoom = dungeon:FindFirstChild("bossRoom")
+		if bossRoom ~= nil then
+			local fin = bossRoom:FindFirstChild("dungeonFinished")
+			if fin ~= nil and fin:IsA("BoolValue") and fin.Value then
+				return true
+			end
+		end
+	end
+	local dp = workspace:FindFirstChild("dungeonProgress")
+	if dp ~= nil and dp:IsA("StringValue") and dp.Value == "bossKilled" then
+		return true
+	end
+	return false
+end
+
+local function fireReplayRemote()
+	local remotesFolder = ReplicatedStorage:FindFirstChild("remotes")
+	local remote = remotesFolder and remotesFolder:FindFirstChild("replayDungeon")
+	if not (remote and remote:IsA("RemoteEvent")) then
+		return false, "replayDungeon not found"
+	end
+	local data = collectDungeonData()
+	if data.dungeonName == nil then
+		return false, "no dungeonName in workspace"
+	end
+	local ok, err = pcall(function()
+		remote:FireServer(data)
+	end)
+	return ok, err
+end
+
+-- Дроп появился: в PlayerGui.rewardGuiHolder.holder есть предметы (грид-слоты).
+local function dropDetected()
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if playerGui == nil then
+		return false
+	end
+	local holderGui = playerGui:FindFirstChild("rewardGuiHolder")
+	if holderGui == nil then
+		return false
+	end
+	local holder = holderGui:FindFirstChild("holder")
+	if holder == nil then
+		return holderGui.Enabled
+	end
+	for _, child in ipairs(holder:GetChildren()) do
+		if child:IsA("GuiObject") then
+			return true
+		end
+	end
+	return false
+end
+
+-- Реплей: босс убит -> ЖДЁМ ПОЯВЛЕНИЯ ДРОПА (rewardGuiHolder) -> пауза на
+-- подбор -> replayDungeon:FireServer(collectDungeonData()) — как кнопка игры.
+-- Фолбэк: дропа нет дольше dropWaitMax секунд — реплеем всё равно.
+local function autoReplayTick()
+	if not cfg.enabled or not cfg.autoReplay then
+		bot.replayStage = nil
+		return
+	end
+	local now = os.clock()
+	if not isRunFinished() then
+		bot.replayStage = nil
+		return
+	end
+	if bot.replayStage == nil then
+		bot.replayStage = "waitDrop"
+		bot.replayStageAt = now
+		log("auto-replay: run finished, waiting for drop...")
+		return
+	end
+	if bot.replayStage == "waitDrop" then
+		if dropDetected() then
+			bot.replayStage = "dropSeen"
+			bot.replayStageAt = now
+			log("auto-replay: drop appeared, waiting pickup")
+		elseif now - bot.replayStageAt > cfg.dropWaitMax then
+			bot.replayStage = "dropSeen"
+			bot.replayStageAt = now
+			log("auto-replay: no drop detected in timeout, replaying anyway")
+		end
+		return
+	end
+	if bot.replayStage == "dropSeen" then
+		if now - bot.replayStageAt < cfg.dropPickDelay then
+			return
+		end
+		if now - bot.lastReplayFire < 15 then
+			return
+		end
+		bot.lastReplayFire = now
+		bot.replayStage = nil
+		local ok, err = fireReplayRemote()
+		if ok then
+			bot.routeIndex = 1
+			bot.routeDone = false
+			bot.routeLastWp = nil
+			bot.routeLastDist = nil
+			resetPathState()
+			log("auto-replay: fired replayDungeon (route reset to wp 1)")
+		else
+			log("auto-replay: failed: " .. tostring(err))
+		end
+	end
+end
+
+-- Проверка спид-буста: игра сбрасывает WalkSpeed при смене состояний, входе
+-- в данж, кастах и т.д. — ворчер на событие ловит не всё (и пишет с задержкой).
+-- Здесь — периодическая проверка: пока бот и тумблер включены, WalkSpeed
+-- обязан быть SPEED_BOOST; иначе — мгновенно возвращаем.
+local function speedBoostTick()
+	if not cfg.enabled or not cfg.speedBoost then
+		return
+	end
+	local _, humanoid = getCharParts()
+	if humanoid ~= nil and humanoid.Health > 0 and humanoid.WalkSpeed ~= SPEED_BOOST then
+		local before = math.floor(humanoid.WalkSpeed + 0.5)
+		humanoid.WalkSpeed = SPEED_BOOST
+		log(("speed check: restored %d -> %d"):format(before, SPEED_BOOST))
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		validateEnemies()
+		positionStuckTick()
+		computeTimeoutTick()
+		speedBoostTick()
+		autoStartTick()
+		autoReplayTick()
+	end
+end)
+
+local function setupCharacter(character)
+	local humanoid = character:WaitForChild("Humanoid", 10)
+	local hrp = character:WaitForChild("HumanoidRootPart", 10)
+	bot.hrp = hrp
+	if humanoid == nil or hrp == nil then
+		return
+	end
+	humanoid.Died:Connect(function()
+		bot.state = "DEAD"
+		bot.target = nil
+		bot.waitUntil = nil
+		resetPathState()
+		log("died")
+	end)
+	if cfg.speedBoost and cfg.enabled then
+		humanoid.WalkSpeed = SPEED_BOOST
+	end
+	humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
+		if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
+			and humanoid.Health > 0 and humanoid.WalkSpeed ~= SPEED_BOOST then
+			-- Мгновенный возврат: скорость выше буста (рывок способности) не
+			-- трогаем — только меньше. Периодический тик докроет остальное.
+			if humanoid.WalkSpeed < SPEED_BOOST then
+				humanoid.WalkSpeed = SPEED_BOOST
+			else
+				task.delay(rand(0.1, 0.3), function()
+					if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
+						and humanoid.WalkSpeed ~= SPEED_BOOST then
+						humanoid.WalkSpeed = SPEED_BOOST
+					end
+				end)
+			end
+		end
+	end)
+	bot.state = "IDLE"
+	log("character ready")
+	if cfg.enabled and not bot.started then
+		bot.started = true
+		task.delay(0.5, function()
+			if cfg.enabled then
+				setEnabled(true)
+			end
+		end)
+	end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+	task.delay(0.5, function()
+		setupCharacter(character)
+	end)
+end)
+if LocalPlayer.Character ~= nil then
+	task.spawn(function()
+		setupCharacter(LocalPlayer.Character)
+	end)
+end
+
+buildHud()
+highlight = Instance.new("Highlight")
+highlight.FillColor = Color3.fromRGB(255, 170, 40)
+highlight.OutlineColor = Color3.fromRGB(255, 220, 90)
+highlight.FillTransparency = 0.75
+highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+
+rescanAll()
+task.spawn(function()
+	while true do
+		task.wait(5)
+		rescanAll()
+	end
+end)
+
+-- Автозагрузка конфига ДО создания GUI: элементы создаются уже с сохранёнными
+-- значениями (данж, мастер, стоп-дистанция, каст и т.д.).
+pcall(function()
+	local hadFile = isfile ~= nil and isfile(CONFIG_FILE)
+	loadConfig()
+	if hadFile and cfg.enabled then
+		log("config: bot was enabled, autostart will resume")
+	end
+end)
+
+task.spawn(function()
+	local ok, Rayfield = pcall(function()
+		return loadstring(game:HttpGet("https://raw.githubusercontent.com/SiriusSoftwareLtd/Rayfield/main/source.lua"))()
+	end)
+	if not ok or typeof(Rayfield) ~= "table" then
+		log("Rayfield failed: toggle bot with B")
+		UserInputService.InputBegan:Connect(function(input, processed)
+			if processed then
+				return
+			end
+			if input.KeyCode == Enum.KeyCode.B then
+				setEnabled(not cfg.enabled)
+			end
+		end)
+		return
+	end
+
+	local window = Rayfield:CreateWindow({
+		Name = "Dungeon Test Bot",
+		LoadingTitle = "Dungeon Test Bot",
+		LoadingSubtitle = "legit tester bot",
+		ConfigurationSaving = {
+			Enabled = false,
+		},
+		KeySystem = false,
+	})
+
+	local mainTab = window:CreateTab("Main", 4483362458)
+	local debugTab = window:CreateTab("Debug", 4483362458)
+	local dungeonTab = window:CreateTab("Dungeon", 4483362458)
+	local autoTab = window:CreateTab("Auto", 4483362458)
+	local configTab = window:CreateTab("Config", 4483362458)
+
+	local dungeonNames = {}
+	for name in pairs(DUNGEONS) do
+		table.insert(dungeonNames, name)
+	end
+	table.sort(dungeonNames)
+
+	if #dungeonNames > 0 then
+		local function selectDungeon(name)
+			bot.currentDungeon = name
+			bot.routeIndex = 1
+			bot.routeDone = false
+			bot.routeLastWp = nil
+			bot.routeLastDist = nil
+			resetPathState()
+			setSpawnMarkers(cfg.spawnMarkers)
+			log("dungeon: " .. tostring(name) .. " (route reset to wp 1)")
+			scheduleSave()
+		end
+
+		dungeonTab:CreateDropdown({
+			Name = "Данж",
+			Options = dungeonNames,
+			Flag = "dbot_dungeon",
+			Callback = function(option)
+				local name = option
+				if typeof(option) == "table" then
+					name = option[1] or option.CurrentValue
+				end
+				if typeof(name) == "string" and DUNGEONS[name] ~= nil then
+					selectDungeon(name)
+				end
+			end,
+		})
+
+		dungeonTab:CreateButton({
+			Name = "Сброс прогресса маршрута",
+			Callback = function()
+				if bot.currentDungeon ~= nil then
+					selectDungeon(bot.currentDungeon)
+				else
+					log("route reset: no dungeon selected")
+				end
+			end,
+		})
+
+		dungeonTab:CreateToggle({
+			Name = "Маркеры спавн-точек",
+			CurrentValue = cfg.spawnMarkers,
+			Flag = "dbot_spawnmarkers",
+			Callback = function(value)
+				cfg.spawnMarkers = value
+				setSpawnMarkers(value)
+			end,
+		})
+
+		dungeonTab:CreateButton({
+			Name = "Вставить координаты вейпоинтов (в лог)",
+			Callback = function()
+				if bot.currentDungeon == nil or bot.hrp == nil then
+					log("waypoint dump: need dungeon + character")
+					return
+				end
+				local pos = bot.hrp.Position
+				log(("waypoint for %s: Vector3.new(%.1f, %.1f, %.1f)"):format(
+					bot.currentDungeon, pos.X, pos.Y, pos.Z
+				))
+			end,
+		})
+	end
+
+	mainTab:CreateToggle({
+		Name = "Мастер-вкл",
+		CurrentValue = cfg.enabled,
+		Flag = "dbot_master",
+		Callback = function(value)
+			setEnabled(value)
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateToggle({
+		Name = "Спид-буст 20",
+		CurrentValue = cfg.speedBoost,
+		Flag = "dbot_speed",
+		Callback = function(value)
+			cfg.speedBoost = value
+			local _, humanoid = getCharParts()
+			if humanoid ~= nil then
+				humanoid.WalkSpeed = value and SPEED_BOOST or SPEED_NORMAL
+			end
+			log("speed boost: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Стоп-дистанция",
+		Range = { 3, 60 },
+		Increment = 1,
+		Suffix = "studs",
+		CurrentValue = cfg.stopDist,
+		Flag = "dbot_stopdist",
+		Callback = function(value)
+			cfg.stopDist = value
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Дальность каста (0 = выкл)",
+		Range = { 0, 150 },
+		Increment = 5,
+		Suffix = "studs",
+		CurrentValue = cfg.castRange,
+		Flag = "dbot_castrange",
+		Callback = function(value)
+			cfg.castRange = value
+			log(("cast range: %d"):format(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateToggle({
+		Name = "Аимлок телом (камеру не трогать)",
+		CurrentValue = cfg.aimlock,
+		Flag = "dbot_aimlock",
+		Callback = function(value)
+			cfg.aimlock = value
+			log("aimlock: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateToggle({
+		Name = "Стоять на кд скиллов (после каста — ждать кд)",
+		CurrentValue = cfg.waitOnSkills,
+		Flag = "dbot_waitonskills",
+		Callback = function(value)
+			cfg.waitOnSkills = value
+			if not value then
+				bot.waitUntil = nil
+			end
+			log("wait on skills: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateToggle({
+		Name = "Скип застрявших вейпоинтов (выкл = упорно пытаться)",
+		CurrentValue = cfg.skipStuckWaypoints,
+		Flag = "dbot_skipstuck",
+		Callback = function(value)
+			cfg.skipStuckWaypoints = value
+			log("skip stuck waypoints: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Радиус босс-гейта (Northern Lands)",
+		Range = { 20, 150 },
+		Increment = 5,
+		Suffix = "studs",
+		CurrentValue = cfg.bossGateRadius,
+		Flag = "dbot_bossgate",
+		Callback = function(value)
+			cfg.bossGateRadius = value
+			log(("boss gate radius: %d"):format(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Дальность каста на босс-гейте",
+		Range = { 0, 150 },
+		Increment = 5,
+		Suffix = "studs",
+		CurrentValue = cfg.bossGateCast,
+		Flag = "dbot_bossgatecast",
+		Callback = function(value)
+			cfg.bossGateCast = value
+			log(("boss gate cast: %d"):format(value))
+			scheduleSave()
+		end,
+	})
+
+	for i, skill in ipairs(SKILLS) do
+		mainTab:CreateSlider({
+			Name = ("Кд скилла: %s"):format(skill.name),
+			Range = { 0.5, 30 },
+			Increment = 0.5,
+			Suffix = "s",
+			CurrentValue = skill.cd,
+			Flag = "dbot_skillcd_" .. i,
+			Callback = function(value)
+				skill.cd = value
+				log(("skill cd %s: %.1fs"):format(skill.name, value))
+				scheduleSave()
+			end,
+		})
+	end
+
+	mainTab:CreateSlider({
+		Name = "Интервал репаса",
+		Range = { 0.3, 2 },
+		Increment = 0.1,
+		Suffix = "s",
+		CurrentValue = cfg.repathInterval,
+		Flag = "dbot_repath",
+		Callback = function(value)
+			cfg.repathInterval = value
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Интервал ретаргета (проверка ближайшего)",
+		Range = { 0.25, 3 },
+		Increment = 0.25,
+		Suffix = "s",
+		CurrentValue = cfg.retargetInterval,
+		Flag = "dbot_retarget",
+		Callback = function(value)
+			cfg.retargetInterval = value
+		end,
+	})
+
+	debugTab:CreateToggle({
+		Name = "Подсветка цели",
+		CurrentValue = cfg.highlight,
+		Flag = "dbot_hl",
+		Callback = function(value)
+			cfg.highlight = value
+			applyHighlight()
+		end,
+	})
+
+	debugTab:CreateToggle({
+		Name = "Окно лога",
+		CurrentValue = cfg.showLog,
+		Flag = "dbot_log",
+		Callback = function(value)
+			cfg.showLog = value
+			if logFrame ~= nil then
+				logFrame.Visible = value
+			end
+		end,
+	})
+
+	debugTab:CreateButton({
+		Name = "Пересканировать мобов",
+		Callback = function()
+			rescanAll()
+		end,
+	})
+
+	autoTab:CreateToggle({
+		Name = "Авто-старт данжа (changeStartValue)",
+		CurrentValue = cfg.autoStart,
+		Flag = "dbot_autostart",
+		Callback = function(value)
+			cfg.autoStart = value
+			log("auto start: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoTab:CreateToggle({
+		Name = "Авто-реплей данжа (replayDungeon)",
+		CurrentValue = cfg.autoReplay,
+		Flag = "dbot_autoreplay",
+		Callback = function(value)
+			cfg.autoReplay = value
+			log("auto replay: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoTab:CreateSlider({
+		Name = "Ожидание дропа (макс, фолбэк)",
+		Range = { 5, 60 },
+		Increment = 1,
+		Suffix = "s",
+		CurrentValue = cfg.dropWaitMax,
+		Flag = "dbot_dropwait",
+		Callback = function(value)
+			cfg.dropWaitMax = value
+		end,
+	})
+
+	autoTab:CreateSlider({
+		Name = "Пауза после дропа (на подбор)",
+		Range = { 1, 15 },
+		Increment = 1,
+		Suffix = "s",
+		CurrentValue = cfg.dropPickDelay,
+		Flag = "dbot_droppick",
+		Callback = function(value)
+			cfg.dropPickDelay = value
+		end,
+	})
+
+	pcall(function()
+		autoTab:CreateParagraph({
+			Title = "Как работает авто-цикл",
+			Content = "Старт: в данже бот сам жмёт changeStartValue (без аргументов). Реплей: после убийства босса бот ЖДЁТ появления дропа (rewardGuiHolder), даёт время на подбор и шлёт replayDungeon с данными данжа. Если дроп не появился за лимит ожидания — реплей всё равно.",
+		})
+	end)
+
+	configTab:CreateButton({
+		Name = "Сохранить конфиг сейчас",
+		Callback = function()
+			saveConfig()
+		end,
+	})
+
+	configTab:CreateButton({
+		Name = "Загрузить конфиг из файла (в логику)",
+		Callback = function()
+			local ok = loadConfig()
+			if not ok then
+				log("config load: no file or read failed")
+			end
+		end,
+	})
+
+	configTab:CreateToggle({
+		Name = "Авто-сохранение при изменениях",
+		CurrentValue = cfg.autoSave,
+		Flag = "dbot_autosave",
+		Callback = function(value)
+			cfg.autoSave = value
+			log("auto save: " .. tostring(value))
+			if value then
+				scheduleSave()
+			end
+		end,
+	})
+
+	configTab:CreateButton({
+		Name = "Сбросить конфиг к дефолтам (удалить файл)",
+		Callback = function()
+			local ok = pcall(function()
+				if delfile ~= nil then
+					delfile(CONFIG_FILE)
+				else
+					writefile(CONFIG_FILE, "{}")
+				end
+			end)
+			log(ok and "config file reset (restart script for defaults)" or "config reset failed")
+		end,
+	})
+
+	configTab:CreateButton({
+		Name = "Авто-перезапуск после перезахода: статус",
+		Callback = function()
+			log("autorestart: queue_on_teleport " .. (boot.queueSupported and "OK (supported)" or "NOT supported by executor"))
+			log("autorestart: remote " .. REMOTE_URL)
+			log("autorestart: fallback file " .. (boot.fileReady and ("ready: " .. BOOT_FILE) or "missing (не критично)"))
+			if not boot.queueSupported then
+				log("autorestart: executor без queue_on_teleport — авто-подъём после телепорта невозможен")
+			else
+				log("autorestart: после телепорта/перезахода бот загрузится сам по URL")
+			end
+		end,
+	})
+
+	pcall(function()
+		configTab:CreateParagraph({
+			Title = "Авто-перезапуск после перезахода",
+			Content = "Реплей данжа = телепорт на новый сервер, где скрипт уничтожается. Бот поднимается сам: queue_on_teleport ставит загрузчик, который после телепорта тянет скрипт по ссылке GitHub (" .. REMOTE_URL .. ") и запускает — autoexec и локальный файл не нужны. Обновления скрипта просто коммить в репозиторий. Конфиг (данж, мастер, все настройки) применится автоматически.",
+		})
+	end)
+
+	pcall(function()
+		configTab:CreateParagraph({
+			Title = "Сохранение настроек",
+			Content = "Конфиг хранится в DungeonBot/config.json (папка executor'а) и автоматически загружается при старте скрипта: выбранный данж, мастер-вкл, стоп-дистанция, каст, все тумблеры и слайдеры. Каждое изменение сохраняется через секунду автоматически. «Загрузить» применяется к логике сразу, но отображение GUI обновится после перезапуска скрипта.",
+		})
+	end)
+
+	log("gui ready")
+end)
+
+log("DungeonBot loaded")
