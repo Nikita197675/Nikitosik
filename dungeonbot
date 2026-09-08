@@ -23,14 +23,18 @@
 -- дальше). Босс-гейты (Northern Lands): точка {pos=.., boss=true} не
 -- засчитывается, пока в bossGateRadius от неё есть живой враг; смерть не
 -- сбрасывает routeIndex — после респавна бот возвращается к гейту.
--- WAIT_SKILLS: скиллы прожались -> бот стоит ровно кд (касты продлевают) -> бежит.
+-- WAIT_SKILLS: скиллы прожались -> бот стоит ровно кд от момента каста -> бежит.
+-- Кулдаун — СИГНАЛЬНЫЙ (из дампов Tool'ов): tool.cooldown (NumberValue, сервер)
+-- и busyCasting на персонаже — готовность читается из игры, ноль таймеров;
+-- потерянная из-за пинга ремотка повторяется сама. Фолбэк timer — по реестру
+-- SKILLS, если у Tool'а нет cooldown-значения. Стойка = cooldownLength (6.0).
 -- Аимлок — ТОЛЬКО телом (камеру не трогаем, игра без шифтлока).
 -- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
 -- Если Rayfield не загрузился — переключение бота клавишей B.
--- Авто-перезапуск: queue_on_teleport грузит скрипт по REMOTE_URL (GitHub) —
--- после телепорта/перезахода (реплей данжа = смена сервера) бот поднимается
--- сам, без autoexec; фолбэк — локальная копия DungeonBot/script.lua.
--- Конфиг (DungeonBot/config.json) применяется автоматически при каждом старте.
+-- Авто-перезапуск (только онлайн): queue_on_teleport грузит скрипт по
+-- REMOTE_URL (GitHub raw) — после телепорта/перезахода бот поднимается сам;
+-- тумблер autoRestart (вкладка Config) включает/выключает, постановка — после
+-- загрузки конфига. Конфиг применяется ПЕРВЫМ делом при каждом старте.
 
 -- Запрещённые place/game id: в этих играх скрипт не запускается вообще.
 local BLOCKED_GAME_IDS = {
@@ -46,17 +50,17 @@ if _G.__DUNGEON_BOT_ACTIVE then
 end
 _G.__DUNGEON_BOT_ACTIVE = true
 
--- == Авто-перезапуск после телепорта/перезахода ==
+-- == Авто-перезапуск после телепорта/перезахода (только онлайн, GitHub) ==
 -- Реплей данжа = телепорт на новый сервер, executor уничтожает скрипт.
 -- queue_on_teleport ставит загрузчик: после телепорта он дожидается загрузки
 -- игры и тянет скрипт по REMOTE_URL (GitHub raw) — бот поднимается сам,
--- без autoexec и без локального файла. Фолбэк: локальная копия
--- DungeonBot/script.lua (автосохранение при запуске), если GitHub недоступен.
+-- без autoexec и без локальных файлов. Обновления = коммит в репозиторий.
 -- В запрещённые игры (BLOCKED_GAME_IDS) загрузчик не выполняется.
+-- Тумблер cfg.autoRestart (вкладка Config): загрузчик ставится ПОСЛЕ загрузки
+-- конфига — учитывает сохранённое значение; вкл в рантайме ставит немедленно.
 
 local REMOTE_URL = "https://raw.githubusercontent.com/Nikita197675/Nikitosik/refs/heads/main/dungeonbot"
-local BOOT_FILE = "DungeonBot/script.lua"
-local boot = { queueSupported = false, fileReady = false }
+local boot = { supported = false, queued = false, loader = nil }
 
 local function queueTeleport(str)
 	local fn = queue_on_teleport or queueonteleport
@@ -69,36 +73,17 @@ local function queueTeleport(str)
 end
 
 do
-	-- Автосохранение своей копии (фолбэк, если GitHub недоступен): executor
-	-- обычно отдаёт путь исполняемого файла в chunk source ("@путь").
-	if writefile ~= nil and readfile ~= nil and not (isfile ~= nil and isfile(BOOT_FILE)) then
-		local source = ""
-		pcall(function()
-			source = debug.getinfo(1, "S").source or ""
-		end)
-		if source:sub(1, 1) == "@" then
-			local path = source:sub(2)
-			local ok, content = pcall(readfile, path)
-			if ok and type(content) == "string" and #content > 1000 then
-				pcall(function()
-					makefolder("DungeonBot")
-				end)
-				pcall(function()
-					writefile(BOOT_FILE, content)
-				end)
-			end
-		end
-	end
-	boot.fileReady = isfile ~= nil and readfile ~= nil and isfile(BOOT_FILE)
-
 	-- Загрузчик: ждёт игру/игрока, проверяет запрещённые id, тянет скрипт
-	-- по URL с ретраями; если GitHub так и не ответил — локальная копия.
+	-- по URL с ретраями. Строку готовим здесь, ВЫЗОВ queueTeleport — после
+	-- загрузки конфига (учитывает тумблер autoRestart).
+	boot.supported = queue_on_teleport ~= nil or queueonteleport ~= nil
+		or (getgenv ~= nil and (getgenv().queue_on_teleport ~= nil or getgenv().queueonteleport ~= nil))
 	local blockedIds = {}
 	for id in pairs(BLOCKED_GAME_IDS) do
 		table.insert(blockedIds, ("[%s] = true"):format(id))
 	end
 	local blockedTable = "{" .. table.concat(blockedIds, ", ") .. "}"
-	local loader = ([[
+	boot.loader = ([[
 		repeat task.wait(0.1) until game:IsLoaded()
 		local Players = game:GetService("Players")
 		while Players.LocalPlayer == nil do
@@ -118,11 +103,7 @@ do
 			end
 			task.wait(1)
 		end
-		pcall(function()
-			loadstring(readfile(%q))()
-		end)
-	]]):format(blockedTable, REMOTE_URL, BOOT_FILE)
-	boot.queueSupported = queueTeleport(loader)
+	]]):format(blockedTable, REMOTE_URL)
 end
 
 local Players = game:GetService("Players")
@@ -278,6 +259,7 @@ local cfg = {
 	dropWaitMax = 30,
 	dropPickDelay = 3,
 	autoSave = true,
+	autoRestart = true,
 	highlight = true,
 	showLog = false,
 }
@@ -466,6 +448,9 @@ local function buildHud()
 	hudGui = Instance.new("ScreenGui")
 	hudGui.Name = "DungeonBotHUD"
 	hudGui.ResetOnSpawn = false
+	-- Поверх игрового UI (босс-хпбары и пр.): высокий DisplayOrder.
+	hudGui.DisplayOrder = 100
+	hudGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 	hudGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 
 	infoLabel = Instance.new("TextLabel")
@@ -478,6 +463,7 @@ local function buildHud()
 	infoLabel.TextSize = 13
 	infoLabel.Text = "DungeonBot: off"
 	infoLabel.TextXAlignment = Enum.TextXAlignment.Left
+	infoLabel.ZIndex = 10
 	infoLabel.Parent = hudGui
 
 	routeLabel = Instance.new("TextLabel")
@@ -490,6 +476,7 @@ local function buildHud()
 	routeLabel.TextSize = 12
 	routeLabel.Text = "route: none (select dungeon)"
 	routeLabel.TextXAlignment = Enum.TextXAlignment.Left
+	routeLabel.ZIndex = 10
 	routeLabel.Parent = hudGui
 
 	logFrame = Instance.new("Frame")
@@ -498,6 +485,7 @@ local function buildHud()
 	logFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
 	logFrame.BackgroundTransparency = 0.25
 	logFrame.BorderSizePixel = 0
+	logFrame.ZIndex = 10
 	logFrame.Visible = cfg.showLog
 	logFrame.Parent = hudGui
 
@@ -512,6 +500,7 @@ local function buildHud()
 	logLabel.TextXAlignment = Enum.TextXAlignment.Left
 	logLabel.TextYAlignment = Enum.TextYAlignment.Top
 	logLabel.TextWrapped = true
+	logLabel.ZIndex = 11
 	logLabel.Parent = logFrame
 end
 
@@ -767,13 +756,16 @@ local function setSpawnMarkers(on)
 	log(("spawn markers: %d"):format(#spawnMarkers))
 end
 
+-- Подсветка цели: жёлтый маркер на том, кого бот атакует (castTarget/target).
 local function applyHighlight()
 	if highlight == nil then
 		return
 	end
-	if cfg.highlight and cfg.enabled and bot.target ~= nil and bot.target.Parent ~= nil then
+	local focus = bot.castTarget ~= nil and bot.castTarget.Parent ~= nil and bot.castTarget
+		or (bot.target ~= nil and bot.target.Parent ~= nil and bot.target)
+	if cfg.highlight and cfg.enabled and focus then
 		highlight.Adornee = nil
-		highlight.Parent = bot.target
+		highlight.Parent = focus
 	else
 		highlight.Parent = nil
 	end
@@ -884,12 +876,15 @@ task.spawn(function()
 end)
 
 -- == Скиллы через abilityEvent ремоуты Tool'ов (Backpack/Character) ==
--- Как в игре: Backpack["Geyser"].abilityEvent:FireServer() и т.д.
--- Per-skill кд: у каждого скилла свой кулдаун; юзаются только «одетые»
--- (Tool найден в Backpack/Character), отсутствующие тихо скипаются.
--- (SKILLS объявлен выше, у cfg — его видит сохранение конфига.)
+-- Сигнальный режим (из дампов Tool'ов): внутри каждого скилла есть NumberValue
+-- cooldown (серверный остаток кд) и cooldownLength (полный кд), а на персонаже
+-- busyCasting. Нативный гейт игры: cooldown <= 0 and not busyCasting — читаем
+-- готовность прямо из игры, ноль таймеров. Потерянная из-за пинга ремотка
+-- повторится сама (сервер кд не включил -> cooldown остался 0).
+-- Фолбэк timer: Tool без cooldown-значения — старая логика по кд из SKILLS.
 
 local DEFAULT_SKILL_CD = 6.5
+local CAST_DEBOUNCE = 0.5
 
 local skillState = {}
 
@@ -900,6 +895,28 @@ local function skillCdFor(toolName)
 		end
 	end
 	return DEFAULT_SKILL_CD
+end
+
+-- NumberValue-потомок Tool'а (cooldown / cooldownLength). nil-safe.
+local function toolNumber(tool, name)
+	local v = tool:FindFirstChild(name)
+	if v ~= nil and v:IsA("NumberValue") then
+		return v.Value
+	end
+	return nil
+end
+
+-- busyCasting на персонаже (BoolValue из дампов). nil-safe.
+local function isBusyCasting()
+	local character = LocalPlayer.Character
+	if character == nil then
+		return false
+	end
+	local bc = character:FindFirstChild("busyCasting")
+	if bc ~= nil and bc:IsA("BoolValue") then
+		return bc.Value
+	end
+	return false
 end
 
 -- Перечисляем ВСЕ Tool'ы с abilityEvent (Backpack + Character): два слота
@@ -924,9 +941,9 @@ local function getEquippedAbilities()
 	return list
 end
 
--- Скиллы: жгём ВСЕ equipped Tool'ы с abilityEvent (2 слота Geyser — одновременно).
--- Каждому — свой кд (ровно, без рандома). Если что-то прожалось и включён
--- waitOnSkills -> фиксированный таймер: стоим ровно кд от момента каста.
+-- Скиллы: signal (готовность из игры) либо timer (фолбэк по реестру).
+-- waitOnSkills -> фиксированная стойка: ровно кд от момента каста
+-- (длительность = реальный cooldownLength из игры).
 local function fireSkills(now, targetName)
 	local equipped = getEquippedAbilities()
 	local fired = false
@@ -935,16 +952,42 @@ local function fireSkills(now, targetName)
 		local ev = entry.ev
 		local st = skillState[ev]
 		if st == nil then
-			st = { ready = 0, cd = skillCdFor(entry.tool.Name) }
+			local cdValue = toolNumber(entry.tool, "cooldownLength")
+			st = {
+				ready = 0,
+				cd = cdValue ~= nil and cdValue or skillCdFor(entry.tool.Name),
+				signal = toolNumber(entry.tool, "cooldown") ~= nil,
+				debouncedUntil = 0,
+				logged = false,
+			}
 			skillState[ev] = st
 		end
-		if now >= st.ready then
+		if not st.logged then
+			st.logged = true
+			log(("skill mode: %s [%s]"):format(entry.tool.Name, st.signal and "signal" or "timer"))
+		end
+		local canFire
+		if st.signal then
+			-- Нативный гейт игры + дебаунс (окно репликации cooldown > 0 при пинге).
+			canFire = (toolNumber(entry.tool, "cooldown") or 1) <= 0
+				and not isBusyCasting()
+				and now >= st.debouncedUntil
+		else
+			canFire = now >= st.ready
+		end
+		if canFire then
 			local ok = pcall(function()
 				ev:FireServer()
 			end)
 			if ok then
-				st.ready = now + st.cd
 				fired = true
+				if st.signal then
+					-- Только анти-спам окно, НЕ кд: если сервер не принял каст
+					-- (пинг/потеря), cooldown останется 0 и ремотка повторится.
+					st.debouncedUntil = now + CAST_DEBOUNCE
+				end
+				-- Фолбэк-таймер на случай пропажи сигнала + длительность стойки.
+				st.ready = now + st.cd
 				maxReady = math.max(maxReady, st.ready)
 				log(("skill: %s (%.1fs cd) -> %s"):format(entry.tool.Name, st.cd, targetName or (bot.target and bot.target.Name) or "?"))
 			else
@@ -957,8 +1000,7 @@ local function fireSkills(now, targetName)
 			skillState[ev] = nil
 		end
 	end
-	-- Фиксированное ожидание: ровно кд от момента каста (без продлений
-	-- посреди ожидания). Оба гейзера брошены -> стоим 6.5с -> бежим.
+	-- Фиксированное ожидание: ровно кд от момента каста (без продлений).
 	if fired and cfg.waitOnSkills and (bot.waitUntil == nil or now >= bot.waitUntil) then
 		bot.waitUntil = maxReady
 		log(("wait: skills fired, standing %.1fs"):format(maxReady - now))
@@ -1148,13 +1190,17 @@ local function updateInfo(now)
 		return
 	end
 	lastInfoUpdate = now
+	applyHighlight()
+	-- Поле target: только атакуемый (castTarget/target); без боя -> none.
+	local focus = bot.castTarget ~= nil and bot.castTarget.Parent ~= nil and bot.castTarget
+		or (bot.target ~= nil and bot.target.Parent ~= nil and bot.target)
 	local targetText = "none"
 	local distText = "-"
-	if bot.target ~= nil and bot.target.Parent ~= nil then
-		local root = getRoot(bot.target)
-		local humanoid = bot.target:FindFirstChildOfClass("Humanoid")
+	if focus ~= nil then
+		local root = getRoot(focus)
+		local humanoid = focus:FindFirstChildOfClass("Humanoid")
 		local hp = humanoid and math.floor(humanoid.Health / math.max(humanoid.MaxHealth, 1) * 100) or 0
-		targetText = ("%s (%d%%)"):format(bot.target.Name, hp)
+		targetText = ("%s (%d%%)"):format(focus.Name, hp)
 		if root ~= nil and bot.hrp ~= nil then
 			distText = ("%.1f"):format((root.Position - bot.hrp.Position).Magnitude)
 		end
@@ -1162,10 +1208,6 @@ local function updateInfo(now)
 	local count = 0
 	for _ in pairs(bot.enemies) do
 		count += 1
-	end
-	local waitText = "-"
-	if bot.waitUntil ~= nil then
-		waitText = ("%.0fs"):format(math.max(bot.waitUntil - os.clock(), 0))
 	end
 	-- Индикация фактической скорости: пока бот+буст включены, ожидаем 20;
 	-- если игра сбросила — «spd16!» (с восклицанием) до восстановления тиком.
@@ -1179,13 +1221,12 @@ local function updateInfo(now)
 			)
 		end
 	end
-	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d | wait: %s"):format(
+	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d"):format(
 		cfg.enabled and bot.state or "off",
 		speedText,
 		targetText,
 		distText,
-		count,
-		waitText
+		count
 	)
 	if routeLabel ~= nil then
 		local wpCount = #getRoute(bot.currentDungeon) or 0
@@ -1223,38 +1264,10 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		return
 	end
 
-	-- Ranged-каст на ходу: моб в радиусе каста (обычный 90, босс-гейт 80;
-	-- LOS не нужен — боссы за барьерами). Аимлок телом.
-	bot.castTarget = nil
-	if effectiveCastRange() > 0 then
-		local castTarget = findCastTarget(hrp)
-		if castTarget ~= nil then
-			bot.castTarget = castTarget
-			local cRoot = castTargetRoot()
-			if cRoot ~= nil then
-				if cfg.aimlock and bot.state ~= "IN_RANGE" then
-					if not bot.bodyLocked and humanoid.AutoRotate then
-						humanoid.AutoRotate = false
-						bot.bodyLocked = true
-					end
-					faceTarget(hrp, cRoot.Position, deltaTime)
-				end
-				if bot.state ~= "IN_RANGE" and bot.state ~= "WAIT_SKILLS" then
-					fireSkills(now, castTarget.Name)
-				end
-			end
-		end
-	end
-	if bot.bodyLocked and (bot.castTarget == nil or bot.state == "IN_RANGE" or not cfg.aimlock or not cfg.enabled) then
-		if humanoid.AutoRotate == false then
-			humanoid.AutoRotate = true
-		end
-		bot.bodyLocked = false
-	end
-
-	-- WAIT_SKILLS: скиллы прожались -> стоим РОВНО кд от момента каста
+	-- WAIT_SKILLS ПЕРВЫМ: скиллы прожались -> стоим РОВНО кд от момента каста
 	-- (безусловное ожидание по таймеру: моб умер — всё равно досиживаем),
-	-- лицом к цели, если она жива -> таймер истёк -> бежим дальше.
+	-- лицом к цели, если она жива. Таймер истёк -> сброс и падаем НИЖЕ
+	-- в том же кадре — бот мгновенно перекастует без «шага подкрадывания».
 	if cfg.waitOnSkills and bot.waitUntil ~= nil then
 		if now < bot.waitUntil then
 			if bot.state ~= "WAIT_SKILLS" then
@@ -1285,6 +1298,43 @@ RunService.Heartbeat:Connect(function(deltaTime)
 		else
 			bot.waitUntil = nil
 		end
+	end
+
+	-- Ranged-каст: моб в радиусе каста (обычный 90, босс-гейт 80; LOS не
+	-- нужен — боссы за барьерами). Аимлок телом. Скиллы стреляют по своей
+	-- готовности (st.ready) — сразу после истечения кд, без стейт-гейтов.
+	bot.castTarget = nil
+	if effectiveCastRange() > 0 then
+		local castTarget = findCastTarget(hrp)
+		if castTarget ~= nil then
+			bot.castTarget = castTarget
+			local cRoot = castTargetRoot()
+			if cRoot ~= nil then
+				if cfg.aimlock and bot.state ~= "IN_RANGE" then
+					if not bot.bodyLocked and humanoid.AutoRotate then
+						humanoid.AutoRotate = false
+						bot.bodyLocked = true
+					end
+					faceTarget(hrp, cRoot.Position, deltaTime)
+				end
+				if bot.state ~= "IN_RANGE" then
+					fireSkills(now, castTarget.Name)
+					-- Каст только что произошёл и включено ожидание -> немедленно
+					-- стоим (без остаточного шага CHASE между кадрами).
+					if bot.waitUntil ~= nil and now < bot.waitUntil then
+						humanoid:MoveTo(hrp.Position)
+						updateInfo(now)
+						return
+					end
+				end
+			end
+		end
+	end
+	if bot.bodyLocked and (bot.castTarget == nil or bot.state == "IN_RANGE" or not cfg.aimlock or not cfg.enabled) then
+		if humanoid.AutoRotate == false then
+			humanoid.AutoRotate = true
+		end
+		bot.bodyLocked = false
 	end
 
 	if bot.target == nil or not bot.target:IsDescendantOf(workspace) then
@@ -1795,6 +1845,23 @@ local function setupCharacter(character)
 	end
 end
 
+-- Автозагрузка конфига ПЕРВОЙ — ДО подключения персонажа и создания GUI:
+-- к моменту setupCharacter мастер/спид уже восстановлены (нет гонки, из-за
+-- которой спид не выдавался при старте); GUI создаётся с сохранёнными значениями.
+pcall(function()
+	local hadFile = isfile ~= nil and isfile(CONFIG_FILE)
+	loadConfig()
+	if hadFile and cfg.enabled then
+		log("config: bot was enabled, autostart will resume")
+	end
+end)
+
+-- Постановка авто-загрузчика — ПОСЛЕ конфига: учитывает тумблер autoRestart
+-- (сохранённое значение). Вкл в рантайме (вкладка Config) поставит немедленно.
+if cfg.autoRestart and boot.loader ~= nil then
+	boot.queued = queueTeleport(boot.loader)
+end
+
 LocalPlayer.CharacterAdded:Connect(function(character)
 	task.delay(0.5, function()
 		setupCharacter(character)
@@ -1818,16 +1885,6 @@ task.spawn(function()
 	while true do
 		task.wait(5)
 		rescanAll()
-	end
-end)
-
--- Автозагрузка конфига ДО создания GUI: элементы создаются уже с сохранёнными
--- значениями (данж, мастер, стоп-дистанция, каст и т.д.).
-pcall(function()
-	local hadFile = isfile ~= nil and isfile(CONFIG_FILE)
-	loadConfig()
-	if hadFile and cfg.enabled then
-		log("config: bot was enabled, autostart will resume")
 	end
 end)
 
@@ -2054,7 +2111,7 @@ task.spawn(function()
 		mainTab:CreateSlider({
 			Name = ("Кд скилла: %s"):format(skill.name),
 			Range = { 0.5, 30 },
-			Increment = 0.5,
+			Increment = 0.1,
 			Suffix = "s",
 			CurrentValue = skill.cd,
 			Flag = "dbot_skillcd_" .. i,
@@ -2216,15 +2273,34 @@ task.spawn(function()
 		end,
 	})
 
+	configTab:CreateToggle({
+		Name = "Авто-загрузка после телепорта (GitHub)",
+		CurrentValue = cfg.autoRestart,
+		Flag = "dbot_autorestart",
+		Callback = function(value)
+			cfg.autoRestart = value
+			if value and not boot.queued and boot.loader ~= nil then
+				boot.queued = queueTeleport(boot.loader)
+			end
+			if value then
+				log("auto restart: on" .. (boot.queued and " (queued)" or " (queue failed)"))
+			else
+				log("auto restart: off (действует с этого запуска; уже поставленный загрузчик не убрать)")
+			end
+			scheduleSave()
+		end,
+	})
+
 	configTab:CreateButton({
 		Name = "Авто-перезапуск после перезахода: статус",
 		Callback = function()
-			log("autorestart: queue_on_teleport " .. (boot.queueSupported and "OK (supported)" or "NOT supported by executor"))
+			log("autorestart: queue_on_teleport " .. (boot.supported and "supported" or "NOT supported by executor"))
 			log("autorestart: remote " .. REMOTE_URL)
-			log("autorestart: fallback file " .. (boot.fileReady and ("ready: " .. BOOT_FILE) or "missing (не критично)"))
-			if not boot.queueSupported then
+			log("autorestart: enabled = " .. tostring(cfg.autoRestart)
+				.. (boot.queued and ", loader queued" or ", loader not queued"))
+			if not boot.supported then
 				log("autorestart: executor без queue_on_teleport — авто-подъём после телепорта невозможен")
-			else
+			elseif cfg.autoRestart and boot.queued then
 				log("autorestart: после телепорта/перезахода бот загрузится сам по URL")
 			end
 		end,
@@ -2233,7 +2309,7 @@ task.spawn(function()
 	pcall(function()
 		configTab:CreateParagraph({
 			Title = "Авто-перезапуск после перезахода",
-			Content = "Реплей данжа = телепорт на новый сервер, где скрипт уничтожается. Бот поднимается сам: queue_on_teleport ставит загрузчик, который после телепорта тянет скрипт по ссылке GitHub (" .. REMOTE_URL .. ") и запускает — autoexec и локальный файл не нужны. Обновления скрипта просто коммить в репозиторий. Конфиг (данж, мастер, все настройки) применится автоматически.",
+			Content = "Реплей данжа = телепорт на новый сервер, где скрипт уничтожается. Бот поднимается сам: queue_on_teleport ставит загрузчик, который после телепорта тянет скрипт по ссылке GitHub (" .. REMOTE_URL .. ") и запускает — autoexec и локальные файлы не нужны. Тумблер выше включает/выключает авто-загрузку (выключение действует с текущего запуска). Обновления скрипта просто коммить в репозиторий. Конфиг (данж, мастер, все настройки) применится автоматически.",
 		})
 	end)
 
