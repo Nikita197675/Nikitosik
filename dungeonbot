@@ -29,6 +29,10 @@
 -- потерянная из-за пинга ремотка повторяется сама. Фолбэк timer — по реестру
 -- SKILLS, если у Tool'а нет cooldown-значения. Стойка = cooldownLength (6.0).
 -- Аимлок — ТОЛЬКО телом (камеру не трогаем, игра без шифтлока).
+-- DUO-режим (вкладка Duo): плеер 1 при входе в данж держит полный стоп 6с,
+-- затем стартует (changeStartValue); плеер 2 никогда не стартует сам и стоит
+-- до серверной репликации dungeonStarted == true (первый стартанул).
+-- Роль хранится в конфиге (duoRole: off/p1/p2) — переживает реплей-телепорт.
 -- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
 -- Если Rayfield не загрузился — переключение бота клавишей B.
 -- Авто-перезапуск (только онлайн): queue_on_teleport грузит скрипт по
@@ -260,6 +264,7 @@ local cfg = {
 	dropPickDelay = 3,
 	autoSave = true,
 	autoRestart = true,
+	duoRole = "off",
 	highlight = true,
 	showLog = false,
 }
@@ -310,6 +315,9 @@ local bot = {
 	posStuckAt = 0,
 	posStuckTime = 0,
 	posStuckJumped = false,
+	duoHoldUntil = nil,
+	duoWaitLoggedAt = 0,
+	duoHoldLoggedAt = 0,
 }
 
 local function rand(a, b)
@@ -424,6 +432,12 @@ local function applyConfigData(data)
 				end
 			end
 		end
+	end
+	-- Duo-роль: валидация сохранённого значения (строка из config.json).
+	if cfg.duoRole ~= "p1" and cfg.duoRole ~= "p2" then
+		cfg.duoRole = "off"
+	else
+		log("config: duoRole -> " .. cfg.duoRole)
 	end
 	return applied
 end
@@ -1221,12 +1235,19 @@ local function updateInfo(now)
 			)
 		end
 	end
-	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d"):format(
+	local duoText = ""
+	if cfg.duoRole == "p1" then
+		duoText = " | duo: p1"
+	elseif cfg.duoRole == "p2" then
+		duoText = " | duo: p2 waiting"
+	end
+	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d%s"):format(
 		cfg.enabled and bot.state or "off",
 		speedText,
 		targetText,
 		distText,
-		count
+		count,
+		duoText
 	)
 	if routeLabel ~= nil then
 		local wpCount = #getRoute(bot.currentDungeon) or 0
@@ -1247,6 +1268,13 @@ local function updateInfo(now)
 	end
 end
 
+-- Duo-детект данжа: реплицированный dungeonName (StringValue) в workspace.
+-- Нужен дуо-гейту Heartbeat и авто-старту ниже по файлу.
+local function inDungeonNow()
+	local dn = workspace:FindFirstChild("dungeonName")
+	return dn ~= nil and dn:IsA("StringValue")
+end
+
 RunService.Heartbeat:Connect(function(deltaTime)
 	local now = os.clock()
 	if not cfg.enabled then
@@ -1262,6 +1290,46 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			log("character dead, waiting respawn")
 		end
 		return
+	end
+
+	-- DUO-гейт (полный стоп):
+	-- p1: 6 секунд после входа в данж — стоим, не таргетим, не кастуем.
+	-- p2: пока dungeonStarted ~= true — стоим бесконечно, ждём первый игрок.
+	if cfg.duoRole ~= "off" and inDungeonNow() then
+		local started = workspace:FindFirstChild("dungeonStarted")
+		local startedVal = started ~= nil and started:IsA("BoolValue") and started.Value or nil
+		if cfg.duoRole == "p2" and startedVal ~= true then
+			bot.state = "DUO_WAIT"
+			bot.target = nil
+			bot.castTarget = nil
+			bot.waitUntil = nil
+			resetPathState()
+			humanoid:MoveTo(hrp.Position)
+			if now - bot.duoWaitLoggedAt > 5 then
+				bot.duoWaitLoggedAt = now
+				log("duo: waiting for player 1...")
+			end
+			updateInfo(now)
+			return
+		end
+		if cfg.duoRole == "p1" and bot.duoHoldUntil ~= nil then
+			if now < bot.duoHoldUntil then
+				bot.state = "DUO_HOLD"
+				bot.target = nil
+				bot.castTarget = nil
+				bot.waitUntil = nil
+				resetPathState()
+				humanoid:MoveTo(hrp.Position)
+				if now - bot.duoHoldLoggedAt > 2 then
+					bot.duoHoldLoggedAt = now
+					log(("duo: p1 holding %.1fs"):format(bot.duoHoldUntil - now))
+				end
+				updateInfo(now)
+				return
+			else
+				bot.duoHoldUntil = nil
+			end
+		end
 	end
 
 	-- WAIT_SKILLS ПЕРВЫМ: скиллы прожались -> стоим РОВНО кд от момента каста
@@ -1548,11 +1616,6 @@ end
 
 -- == Авто-старт / авто-реплей данжа (через ремоуты игры) ==
 
-local function inDungeonNow()
-	local dn = workspace:FindFirstChild("dungeonName")
-	return dn ~= nil and dn:IsA("StringValue")
-end
-
 -- Старт данжа: changeStartValue вызывается БЕЗ аргументов (как игровая кнопка).
 local function fireStartRemote()
 	local remotesFolder = ReplicatedStorage:FindFirstChild("remotes")
@@ -1575,6 +1638,7 @@ local function autoStartTick()
 		bot.startFireCount = 0
 		bot.startedPrev = nil
 		bot.replayStage = nil
+		bot.duoHoldUntil = nil
 		return
 	end
 	local now = os.clock()
@@ -1582,6 +1646,12 @@ local function autoStartTick()
 		bot.inDungeonAt = now
 		bot.startFireCount = 0
 		bot.replayStage = nil
+		-- Duo: плеер 1 при входе в данж держит полный стоп 6 секунд,
+		-- только потом жмёт старт (даёт плееру 2 время загрузиться).
+		if cfg.duoRole == "p1" then
+			bot.duoHoldUntil = now + 6
+			log("duo: player 1 holding 6s before start")
+		end
 		if bot.routeIndex ~= 1 or bot.routeDone then
 			bot.routeIndex = 1
 			bot.routeDone = false
@@ -1601,7 +1671,19 @@ local function autoStartTick()
 		bot.startFireCount = 0
 		return
 	end
-	if now - bot.inDungeonAt < 2.5 then
+	-- Duo: плеер 2 НИКОГДА не шлёт старт — ждёт, пока первый стартанёт
+	-- (детект по серверной репликации dungeonStarted == true).
+	if cfg.duoRole == "p2" then
+		return
+	end
+	local startDelay = 2.5
+	if cfg.duoRole == "p1" and bot.duoHoldUntil ~= nil then
+		if now < bot.duoHoldUntil then
+			return
+		end
+		bot.duoHoldUntil = nil
+	end
+	if now - bot.inDungeonAt < startDelay then
 		return
 	end
 	if bot.startFireCount >= 8 then
@@ -1919,6 +2001,7 @@ task.spawn(function()
 	local debugTab = window:CreateTab("Debug", 4483362458)
 	local dungeonTab = window:CreateTab("Dungeon", 4483362458)
 	local autoTab = window:CreateTab("Auto", 4483362458)
+	local duoTab = window:CreateTab("Duo", 4483362458)
 	local configTab = window:CreateTab("Config", 4483362458)
 
 	local dungeonNames = {}
@@ -2228,6 +2311,31 @@ task.spawn(function()
 			Content = "Старт: в данже бот сам жмёт changeStartValue (без аргументов). Реплей: после убийства босса бот ЖДЁТ появления дропа (rewardGuiHolder), даёт время на подбор и шлёт replayDungeon с данными данжа. Если дроп не появился за лимит ожидания — реплей всё равно.",
 		})
 	end)
+
+	duoTab:CreateDropdown({
+		Name = "Роль в дуо-режиме",
+		Options = { "Выкл", "Плеер 1", "Плеер 2" },
+		CurrentValue = (cfg.duoRole == "p1" and "Плеер 1")
+			or (cfg.duoRole == "p2" and "Плеер 2")
+			or "Выкл",
+		Flag = "dbot_duorole",
+		Callback = function(option)
+			local name = option
+			if typeof(option) == "table" then
+				name = option[1] or option.CurrentValue
+			end
+			if name == "Плеер 1" then
+				cfg.duoRole = "p1"
+			elseif name == "Плеер 2" then
+				cfg.duoRole = "p2"
+			else
+				cfg.duoRole = "off"
+			end
+			bot.duoHoldUntil = nil
+			log("duo: role -> " .. cfg.duoRole)
+			scheduleSave()
+		end,
+	})
 
 	configTab:CreateButton({
 		Name = "Сохранить конфиг сейчас",
