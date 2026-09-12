@@ -340,7 +340,16 @@ end
 
 -- == Сохранение конфига (файл DungeonBot/config.json в папке executor'а) ==
 
-local CONFIG_FILE = "DungeonBot/config.json"
+-- Конфиг — ПЕРСОНАЛЬНЫЙ на аккаунт (DungeonBot/config_<ник>.json): два
+-- игрока на одном executor'е не перезаписывают роли/настройки друг друга.
+local function configFilePath()
+	local name = "default"
+	local lp = Players.LocalPlayer
+	if lp ~= nil and type(lp.Name) == "string" then
+		name = lp.Name
+	end
+	return "DungeonBot/config_" .. name .. ".json"
+end
 local CONFIG_VERSION = 2
 
 local function saveConfig()
@@ -353,7 +362,8 @@ local function saveConfig()
 	end)
 	local data = {}
 	for key, value in pairs(cfg) do
-		if type(value) == "boolean" or type(value) == "number" then
+		-- Строки ОБЯЗАТЕЛЬНО: duoRole ("p1"/"p2"), skill-слоты и т.д.
+		if type(value) == "boolean" or type(value) == "number" or type(value) == "string" then
 			data[key] = value
 		end
 	end
@@ -369,11 +379,11 @@ local function saveConfig()
 		data.skills = skills
 	end
 	local ok = pcall(function()
-		writefile(CONFIG_FILE, game:GetService("HttpService"):JSONEncode(data))
+		local path = configFilePath()
+		writefile(path, game:GetService("HttpService"):JSONEncode(data))
+		log("config saved: " .. path)
 	end)
-	if ok then
-		log("config saved: " .. CONFIG_FILE)
-	else
+	if not ok then
 		log("config save: failed")
 	end
 	return ok
@@ -448,7 +458,7 @@ local function loadConfig()
 		return false
 	end
 	local ok, result = pcall(function()
-		return game:GetService("HttpService"):JSONDecode(readfile(CONFIG_FILE))
+		return game:GetService("HttpService"):JSONDecode(readfile(configFilePath()))
 	end)
 	if not ok or type(result) ~= "table" then
 		return false
@@ -1931,7 +1941,7 @@ end
 -- к моменту setupCharacter мастер/спид уже восстановлены (нет гонки, из-за
 -- которой спид не выдавался при старте); GUI создаётся с сохранёнными значениями.
 pcall(function()
-	local hadFile = isfile ~= nil and isfile(CONFIG_FILE)
+	local hadFile = isfile ~= nil and isfile(configFilePath())
 	loadConfig()
 	if hadFile and cfg.enabled then
 		log("config: bot was enabled, autostart will resume")
@@ -2371,10 +2381,11 @@ task.spawn(function()
 		Name = "Сбросить конфиг к дефолтам (удалить файл)",
 		Callback = function()
 			local ok = pcall(function()
+				local path = configFilePath()
 				if delfile ~= nil then
-					delfile(CONFIG_FILE)
+					delfile(path)
 				else
-					writefile(CONFIG_FILE, "{}")
+					writefile(path, "{}")
 				end
 			end)
 			log(ok and "config file reset (restart script for defaults)" or "config reset failed")
