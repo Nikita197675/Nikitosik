@@ -265,6 +265,8 @@ local cfg = {
 	autoSave = true,
 	autoRestart = true,
 	duoRole = "off",
+	autoTransfer = true,
+	transferThreshold = 280,
 	highlight = true,
 	showLog = false,
 }
@@ -448,6 +450,11 @@ local function applyConfigData(data)
 		cfg.duoRole = "off"
 	else
 		log("config: duoRole -> " .. cfg.duoRole)
+	end
+	-- Порог переноса в сторейдж: диапазон 10–300.
+	if type(cfg.transferThreshold) ~= "number"
+		or cfg.transferThreshold < 10 or cfg.transferThreshold > 300 then
+		cfg.transferThreshold = 280
 	end
 	return applied
 end
@@ -1891,6 +1898,180 @@ task.spawn(function()
 	end
 end)
 
+-- == Авто-перенос инвентаря в сторейдж (вкладка Storage) ==
+-- Данные из ремоутов (по дампам игры): reloadInvy / getPlayerStorage ->
+-- {weapons, abilities, chests, helmets} с ключами вида "weapon_123".
+-- Перенос: moveItemToStorage:InvokeServer(itemType, id) — 1 вещь в секунду,
+-- пока инвентарь не опустеет до 10. Экипированное (серверный флаг equipped:
+-- bool у вещей, {q/e/q2/e2} у способностей) не переносится.
+-- Сторейдж 125 мест: полный -> перенос не стартует; 3 неудачи подряд -> стоп.
+
+local STORAGE_CAP = 125
+local TRANSFER_TARGET_MIN = 10
+local TRANSFER_DELAY = 1
+
+local STORAGE_CATEGORIES = { "weapons", "abilities", "chests", "helmets" }
+local STORAGE_TYPE = {
+	weapons = "weapon",
+	abilities = "ability",
+	chests = "chest",
+	helmets = "helmet",
+}
+
+local storageState = {
+	moving = false,
+	totalMoved = 0,
+	failStreak = 0,
+	blocked = false,
+}
+
+local function storageRemote(name)
+	local remotes = ReplicatedStorage:FindFirstChild("remotes")
+	if remotes == nil then
+		return nil
+	end
+	local r = remotes:FindFirstChild(name)
+	if r ~= nil and r:IsA("RemoteFunction") then
+		return r
+	end
+	return nil
+end
+
+local function storageFetch(name)
+	local r = storageRemote(name)
+	if r == nil then
+		return nil
+	end
+	local ok, result = pcall(function()
+		return r:InvokeServer()
+	end)
+	if not ok or type(result) ~= "table" then
+		return nil
+	end
+	return result
+end
+
+local function storageFlatten(data)
+	local list = {}
+	for _, cat in ipairs(STORAGE_CATEGORIES) do
+		local items = type(data[cat]) == "table" and data[cat] or nil
+		if items ~= nil then
+			for key, item in pairs(items) do
+				local id = tostring(key):match("_(.+)$")
+				if id ~= nil then
+					table.insert(list, {
+						key = tostring(key),
+						type = STORAGE_TYPE[cat],
+						id = id,
+						item = item,
+					})
+				end
+			end
+		end
+	end
+	return list
+end
+
+local function storageIsEquipped(entry)
+	local item = entry.item
+	if type(item) ~= "table" then
+		return false
+	end
+	if entry.type == "ability" then
+		local eq = item.equipped
+		if type(eq) == "table" then
+			for _, slotName in ipairs({ "q", "e", "q2", "e2" }) do
+				if eq[slotName] == true then
+					return true
+				end
+			end
+		end
+		return false
+	end
+	return item.equipped == true
+end
+
+local function storageRun()
+	storageState.moving = true
+	storageState.failStreak = 0
+	local moved = 0
+	while cfg.enabled and cfg.autoTransfer and not storageState.blocked do
+		local data = storageFetch("reloadInvy")
+		if data == nil then
+			task.wait(2)
+		else
+			local list = storageFlatten(data)
+			if #list <= TRANSFER_TARGET_MIN then
+				break
+			end
+			local chosen = nil
+			for _, entry in ipairs(list) do
+				if not storageIsEquipped(entry) then
+					chosen = entry
+					break
+				end
+			end
+			if chosen == nil then
+				break
+			end
+			local r = storageRemote("moveItemToStorage")
+			if r == nil then
+				break
+			end
+			local ok, result = pcall(function()
+				return r:InvokeServer(chosen.type, chosen.id)
+			end)
+			if ok and result then
+				storageState.failStreak = 0
+				moved += 1
+				if moved % 25 == 0 then
+					log(("storage: %d moved, inv %d"):format(moved, #list))
+				end
+			else
+				storageState.failStreak += 1
+				if storageState.failStreak >= 3 then
+					storageState.blocked = true
+					log("storage: full (3 fails), stopped")
+					break
+				end
+			end
+			task.wait(TRANSFER_DELAY)
+		end
+	end
+	storageState.moving = false
+	if moved > 0 then
+		storageState.totalMoved += moved
+		log(("storage: done, moved %d (total %d)"):format(moved, storageState.totalMoved))
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(2)
+		if cfg.enabled and cfg.autoTransfer
+			and not storageState.moving and not storageState.blocked then
+			local data = storageFetch("reloadInvy")
+			if data ~= nil then
+				local list = storageFlatten(data)
+				if #list >= cfg.transferThreshold then
+					local st = storageFetch("getPlayerStorage")
+					if st ~= nil then
+						local stList = storageFlatten(st)
+						if #stList >= STORAGE_CAP then
+							storageState.blocked = true
+							log(("storage: full (%d/%d), not transferring"):format(#stList, STORAGE_CAP))
+						end
+					end
+					if not storageState.blocked then
+						log(("storage: transfer started (%d items)"):format(#list))
+						task.spawn(storageRun)
+					end
+				end
+			end
+		end
+	end
+end)
+
 local function setupCharacter(character)
 	local humanoid = character:WaitForChild("Humanoid", 10)
 	local hrp = character:WaitForChild("HumanoidRootPart", 10)
@@ -2008,6 +2189,7 @@ task.spawn(function()
 	})
 
 	local mainTab = window:CreateTab("Main", 4483362458)
+	local storageTab = window:CreateTab("Storage", 4483362458)
 	local debugTab = window:CreateTab("Debug", 4483362458)
 	local dungeonTab = window:CreateTab("Dungeon", 4483362458)
 	local autoTab = window:CreateTab("Auto", 4483362458)
@@ -2237,6 +2419,34 @@ task.spawn(function()
 		Flag = "dbot_retarget",
 		Callback = function(value)
 			cfg.retargetInterval = value
+		end,
+	})
+
+	storageTab:CreateToggle({
+		Name = "Авто-перенос в сторейдж",
+		CurrentValue = cfg.autoTransfer,
+		Flag = "dbot_autotransfer",
+		Callback = function(value)
+			cfg.autoTransfer = value
+			if value then
+				storageState.blocked = false
+				storageState.failStreak = 0
+			end
+			log("auto transfer: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	storageTab:CreateSlider({
+		Name = "Порог инвентаря (начинать перенос)",
+		Range = { 10, 300 },
+		Increment = 5,
+		Suffix = " items",
+		CurrentValue = cfg.transferThreshold,
+		Flag = "dbot_transferthreshold",
+		Callback = function(value)
+			cfg.transferThreshold = value
+			scheduleSave()
 		end,
 	})
 
