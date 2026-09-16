@@ -118,7 +118,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local SPEED_BOOST = 20
+local SPEED_BOOST = 19
 local SPEED_NORMAL = 16
 local ENEMY_SIGS = {
 	"aggroRange", "damage", "enemyNameplate", "attackSpeed",
