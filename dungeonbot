@@ -3,8 +3,8 @@
 -- (Backpack["Geyser"].abilityEvent:FireServer() и т.д.) — per-skill кд,
 -- юзаются только «одетые» скиллы.
 -- Движение: ТОЛЬКО Humanoid:MoveTo (штатный путь, реплицируется как обычная ходьба).
--- Спид-буст: держит WalkSpeed = 20 (на границе лимита 20; если лимитер откатывает —
--- вернуть SPEED_BOOST = 19), как abilities-ускорители. Двойная защита: ворчер на
+-- Спид-буст: держит WalkSpeed = cfg.speedBoostValue (слайдер 18–20, по 1),
+-- как abilities-ускорители. Двойная защита: ворчер на
 -- изменение свойства (мгновенно, если сбросили ниже 20) + периодический тик
 -- раз 0.5с (speedBoostTick) — игра сбрасывает скорость в самых разных местах.
 -- Автостарт: бот включён сразу при загрузке; настройки (данж, мастер, тумблеры,
@@ -118,7 +118,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local SPEED_BOOST = 18
 local SPEED_NORMAL = 16
 local ENEMY_SIGS = {
 	"aggroRange", "damage", "enemyNameplate", "attackSpeed",
@@ -248,6 +247,7 @@ local DUNGEONS = {
 local cfg = {
 	enabled = false,
 	speedBoost = true,
+	speedBoostValue = 18,
 	stopDist = 45,
 	repathInterval = 0.75,
 	retargetInterval = 1.0,
@@ -455,6 +455,11 @@ local function applyConfigData(data)
 	if type(cfg.transferThreshold) ~= "number"
 		or cfg.transferThreshold < 10 or cfg.transferThreshold > 300 then
 		cfg.transferThreshold = 280
+	end
+	-- Спид-буст: диапазон 18–20.
+	if type(cfg.speedBoostValue) ~= "number"
+		or cfg.speedBoostValue < 18 or cfg.speedBoostValue > 20 then
+		cfg.speedBoostValue = 18
 	end
 	return applied
 end
@@ -826,7 +831,7 @@ local function setEnabled(value)
 		bot.target = nil
 		local hrp, humanoid = getCharParts()
 		if hrp ~= nil and humanoid ~= nil and cfg.speedBoost then
-			humanoid.WalkSpeed = SPEED_BOOST
+			humanoid.WalkSpeed = cfg.speedBoostValue
 		end
 	else
 		log("bot OFF")
@@ -1240,15 +1245,16 @@ local function updateInfo(now)
 	for _ in pairs(bot.enemies) do
 		count += 1
 	end
-	-- Индикация фактической скорости: пока бот+буст включены, ожидаем 20;
-	-- если игра сбросила — «spd16!» (с восклицанием) до восстановления тиком.
-	local speedText = cfg.speedBoost and "spd20" or "spd16"
+	-- Индикация фактической скорости: пока бот+буст включены, ожидаем
+	-- cfg.speedBoostValue; если игра сбросила — «spd16!» (с восклицанием)
+	-- до восстановления тиком.
+	local speedText = cfg.speedBoost and ("spd%d"):format(cfg.speedBoostValue) or "spd16"
 	if cfg.enabled and cfg.speedBoost then
 		local _, hum = getCharParts()
 		if hum ~= nil and hum.Health > 0 then
 			speedText = ("spd%d%s"):format(
 				math.floor(hum.WalkSpeed + 0.5),
-				hum.WalkSpeed ~= SPEED_BOOST and "!" or ""
+				hum.WalkSpeed ~= cfg.speedBoostValue and "!" or ""
 			)
 		end
 	end
@@ -1873,16 +1879,16 @@ end
 -- Проверка спид-буста: игра сбрасывает WalkSpeed при смене состояний, входе
 -- в данж, кастах и т.д. — ворчер на событие ловит не всё (и пишет с задержкой).
 -- Здесь — периодическая проверка: пока бот и тумблер включены, WalkSpeed
--- обязан быть SPEED_BOOST; иначе — мгновенно возвращаем.
+-- обязан быть cfg.speedBoostValue; иначе — мгновенно возвращаем.
 local function speedBoostTick()
 	if not cfg.enabled or not cfg.speedBoost then
 		return
 	end
 	local _, humanoid = getCharParts()
-	if humanoid ~= nil and humanoid.Health > 0 and humanoid.WalkSpeed ~= SPEED_BOOST then
+	if humanoid ~= nil and humanoid.Health > 0 and humanoid.WalkSpeed ~= cfg.speedBoostValue then
 		local before = math.floor(humanoid.WalkSpeed + 0.5)
-		humanoid.WalkSpeed = SPEED_BOOST
-		log(("speed check: restored %d -> %d"):format(before, SPEED_BOOST))
+		humanoid.WalkSpeed = cfg.speedBoostValue
+		log(("speed check: restored %d -> %d"):format(before, cfg.speedBoostValue))
 	end
 end
 
@@ -2087,20 +2093,20 @@ local function setupCharacter(character)
 		log("died")
 	end)
 	if cfg.speedBoost and cfg.enabled then
-		humanoid.WalkSpeed = SPEED_BOOST
+		humanoid.WalkSpeed = cfg.speedBoostValue
 	end
 	humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
 		if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
-			and humanoid.Health > 0 and humanoid.WalkSpeed ~= SPEED_BOOST then
+			and humanoid.Health > 0 and humanoid.WalkSpeed ~= cfg.speedBoostValue then
 			-- Мгновенный возврат: скорость выше буста (рывок способности) не
 			-- трогаем — только меньше. Периодический тик докроет остальное.
-			if humanoid.WalkSpeed < SPEED_BOOST then
-				humanoid.WalkSpeed = SPEED_BOOST
+			if humanoid.WalkSpeed < cfg.speedBoostValue then
+				humanoid.WalkSpeed = cfg.speedBoostValue
 			else
 				task.delay(rand(0.1, 0.3), function()
 					if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
-						and humanoid.WalkSpeed ~= SPEED_BOOST then
-						humanoid.WalkSpeed = SPEED_BOOST
+						and humanoid.WalkSpeed ~= cfg.speedBoostValue then
+						humanoid.WalkSpeed = cfg.speedBoostValue
 					end
 				end)
 			end
@@ -2277,16 +2283,34 @@ task.spawn(function()
 	})
 
 	mainTab:CreateToggle({
-		Name = "Спид-буст 20",
+		Name = "Спид-буст",
 		CurrentValue = cfg.speedBoost,
 		Flag = "dbot_speed",
 		Callback = function(value)
 			cfg.speedBoost = value
 			local _, humanoid = getCharParts()
 			if humanoid ~= nil then
-				humanoid.WalkSpeed = value and SPEED_BOOST or SPEED_NORMAL
+				humanoid.WalkSpeed = value and cfg.speedBoostValue or SPEED_NORMAL
 			end
 			log("speed boost: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateSlider({
+		Name = "Спид-буст (18–20)",
+		Range = { 18, 20 },
+		Increment = 1,
+		Suffix = " spd",
+		CurrentValue = cfg.speedBoostValue,
+		Flag = "dbot_speedvalue",
+		Callback = function(value)
+			cfg.speedBoostValue = value
+			local _, humanoid = getCharParts()
+			if humanoid ~= nil and cfg.speedBoost then
+				humanoid.WalkSpeed = value
+			end
+			log(("speed boost value: %d"):format(value))
 			scheduleSave()
 		end,
 	})
