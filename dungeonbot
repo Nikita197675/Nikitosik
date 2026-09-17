@@ -326,6 +326,25 @@ local function rand(a, b)
 	return a + math.random() * (b - a)
 end
 
+local function resetPathState()
+	bot.pathMode = "none"
+	bot.pathWaypoints = nil
+	bot.wpIndex = 0
+	bot.pathTargetPos = nil
+	bot.lastRepath = 0
+	bot.stuckTime = 0
+end
+
+-- Полный сброс маршрута: нужен и при выборе данжа, и при входе в данж,
+-- и при реплее, и при загрузке конфига.
+local function resetRoute()
+	bot.routeIndex = 1
+	bot.routeDone = false
+	bot.routeLastWp = nil
+	bot.routeLastDist = nil
+	resetPathState()
+end
+
 local hudGui, infoLabel, routeLabel, logLabel, logFrame, highlight
 
 local logLines = {}
@@ -425,10 +444,7 @@ local function applyConfigData(data)
 	local dungeon = data.dungeon
 	if type(dungeon) == "string" and DUNGEONS[dungeon] ~= nil then
 		bot.currentDungeon = dungeon
-		bot.routeIndex = 1
-		bot.routeDone = false
-		bot.routeLastWp = nil
-		bot.routeLastDist = nil
+		resetRoute()
 		applied += 1
 		log("config: dungeon -> " .. dungeon)
 	end
@@ -678,6 +694,19 @@ local function hasLOS(from, to, targetModel)
 	return workspace:Raycast(low, to - low, params) == nil
 end
 
+local function targetScore(model, hrp)
+	local root = getRoot(model)
+	if root == nil then
+		return nil
+	end
+	local score = (root.Position - hrp.Position).Magnitude
+	if not hasLOS(hrp.Position, root.Position, model) then
+		score += LOS_PENALTY
+	end
+	return score
+end
+
+-- Ближайшая живая цель; мёртвые/без-root модели чистятся из реестра на ходу.
 local function pickTarget()
 	local hrp = bot.hrp
 	if hrp == nil then
@@ -685,13 +714,12 @@ local function pickTarget()
 	end
 	local best, bestScore = nil, math.huge
 	for model in pairs(bot.enemies) do
-		local root = getRoot(model)
 		local humanoid = model:FindFirstChildOfClass("Humanoid")
-		if root ~= nil and humanoid ~= nil and humanoid.Health > 0 then
-			local score = (root.Position - hrp.Position).Magnitude
-			if not hasLOS(hrp.Position, root.Position, model) then
-				score += LOS_PENALTY
-			end
+		local score = nil
+		if humanoid ~= nil and humanoid.Health > 0 then
+			score = targetScore(model, hrp)
+		end
+		if score ~= nil then
 			if score < bestScore then
 				best, bestScore = model, score
 			end
@@ -797,8 +825,12 @@ local function applyHighlight()
 	if highlight == nil then
 		return
 	end
-	local focus = bot.castTarget ~= nil and bot.castTarget.Parent ~= nil and bot.castTarget
-		or (bot.target ~= nil and bot.target.Parent ~= nil and bot.target)
+	local focus = nil
+	if bot.castTarget ~= nil and bot.castTarget.Parent ~= nil then
+		focus = bot.castTarget
+	elseif bot.target ~= nil and bot.target.Parent ~= nil then
+		focus = bot.target
+	end
 	if cfg.highlight and cfg.enabled and focus then
 		highlight.Adornee = nil
 		highlight.Parent = focus
@@ -812,15 +844,6 @@ local function stopMovement()
 	if hrp ~= nil and humanoid ~= nil then
 		humanoid:MoveTo(hrp.Position)
 	end
-end
-
-local function resetPathState()
-	bot.pathMode = "none"
-	bot.pathWaypoints = nil
-	bot.wpIndex = 0
-	bot.pathTargetPos = nil
-	bot.lastRepath = 0
-	bot.stuckTime = 0
 end
 
 local function setEnabled(value)
@@ -858,18 +881,6 @@ local function setTarget(model, reason)
 	else
 		log("target: none (" .. tostring(reason) .. ")")
 	end
-end
-
-local function targetScore(model, hrp)
-	local root = getRoot(model)
-	if root == nil then
-		return nil
-	end
-	local score = (root.Position - hrp.Position).Magnitude
-	if not hasLOS(hrp.Position, root.Position, model) then
-		score += LOS_PENALTY
-	end
-	return score
 end
 
 -- Ретаргет каждые cfg.retargetInterval: меняем цель, только если новый моб
@@ -1207,10 +1218,6 @@ local function moveToPosition(hum, hrp, targetPos, now, targetModel)
 	stuckCheck(hum, hrp, now)
 end
 
-local function moveToward(hum, hrp, root, now)
-	moveToPosition(hum, hrp, root.Position, now, bot.target)
-end
-
 local function faceTarget(hrp, targetPos, deltaTime)
 	local desired = CFrame.lookAt(
 		hrp.Position,
@@ -1228,8 +1235,12 @@ local function updateInfo(now)
 	lastInfoUpdate = now
 	applyHighlight()
 	-- Поле target: только атакуемый (castTarget/target); без боя -> none.
-	local focus = bot.castTarget ~= nil and bot.castTarget.Parent ~= nil and bot.castTarget
-		or (bot.target ~= nil and bot.target.Parent ~= nil and bot.target)
+	local focus = nil
+	if bot.castTarget ~= nil and bot.castTarget.Parent ~= nil then
+		focus = bot.castTarget
+	elseif bot.target ~= nil and bot.target.Parent ~= nil then
+		focus = bot.target
+	end
 	local targetText = "none"
 	local distText = "-"
 	if focus ~= nil then
@@ -1273,7 +1284,8 @@ local function updateInfo(now)
 		duoText
 	)
 	if routeLabel ~= nil then
-		local wpCount = #getRoute(bot.currentDungeon) or 0
+		local route = getRoute(bot.currentDungeon)
+		local wpCount = route ~= nil and #route or 0
 		if wpCount > 0 then
 			routeLabel.Text = ("route: %s | wp: %d/%d | %s"):format(
 				bot.currentDungeon,
@@ -1421,7 +1433,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			end
 		end
 	end
-	if bot.bodyLocked and (bot.castTarget == nil or bot.state == "IN_RANGE" or not cfg.aimlock or not cfg.enabled) then
+	if bot.bodyLocked and (bot.castTarget == nil or bot.state == "IN_RANGE" or not cfg.aimlock) then
 		if humanoid.AutoRotate == false then
 			humanoid.AutoRotate = true
 		end
@@ -1555,7 +1567,7 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	-- за барьером продолжаем подходим по пути к мобу вплотную (чекпоинт).
 	if dist > cfg.stopDist or not hasLOS(hrp.Position, root.Position, bot.target) then
 		bot.state = "CHASE"
-		moveToward(humanoid, hrp, root, now)
+		moveToPosition(humanoid, hrp, root.Position, now, bot.target)
 	else
 		bot.state = "IN_RANGE"
 		humanoid:MoveTo(hrp.Position)
@@ -1676,11 +1688,7 @@ local function autoStartTick()
 			log("duo: player 1 holding 6s before start")
 		end
 		if bot.routeIndex ~= 1 or bot.routeDone then
-			bot.routeIndex = 1
-			bot.routeDone = false
-			bot.routeLastWp = nil
-			bot.routeLastDist = nil
-			resetPathState()
+			resetRoute()
 			log("dungeon entered: route reset to wp 1")
 		end
 	end
@@ -1864,11 +1872,7 @@ local function autoReplayTick()
 		bot.replayStage = nil
 		local ok, err = fireReplayRemote()
 		if ok then
-			bot.routeIndex = 1
-			bot.routeDone = false
-			bot.routeLastWp = nil
-			bot.routeLastDist = nil
-			resetPathState()
+			resetRoute()
 			log("auto-replay: fired replayDungeon (route reset to wp 1)")
 		else
 			log("auto-replay: failed: " .. tostring(err))
@@ -2211,11 +2215,7 @@ task.spawn(function()
 	if #dungeonNames > 0 then
 		local function selectDungeon(name)
 			bot.currentDungeon = name
-			bot.routeIndex = 1
-			bot.routeDone = false
-			bot.routeLastWp = nil
-			bot.routeLastDist = nil
-			resetPathState()
+			resetRoute()
 			setSpawnMarkers(cfg.spawnMarkers)
 			log("dungeon: " .. tostring(name) .. " (route reset to wp 1)")
 			scheduleSave()
