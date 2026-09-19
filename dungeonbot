@@ -1,16 +1,19 @@
 -- DungeonBot.lua — легитный тестер-бот для данжей.
 -- Фаза 1: подбегание к мобам. Фаза 2: скиллы через ремоуты Tool'ов
--- (Backpack["Geyser"].abilityEvent:FireServer() и т.д.) — per-skill кд,
--- юзаются только «одетые» скиллы.
+-- (Backpack["Geyser"].abilityEvent:FireServer() и т.д.). Во вкладке Main
+-- выбирается способность для слота 1 и слота 2 (список SKILL_NAMES: Geyser,
+-- Chain Lightning, Life Dash, Flame Strike, Frost Cone); жмутся только
+-- экипированные Tool'ы с выбранным именем — дубль имени в обоих слотах = все
+-- Tool'ы этого имени жгутся одновременно (два Geyser в Northern Lands).
 -- Движение: ТОЛЬКО Humanoid:MoveTo (штатный путь, реплицируется как обычная ходьба).
 -- Спид-буст: держит WalkSpeed = cfg.speedBoostValue (слайдер 18–20, по 1),
 -- как abilities-ускорители. Двойная защита: ворчер на
 -- изменение свойства (мгновенно, если сбросили ниже 20) + периодический тик
 -- раз 0.5с (speedBoostTick) — игра сбрасывает скорость в самых разных местах.
 -- Автостарт: бот включён сразу при загрузке; настройки (данж, мастер, тумблеры,
--- слайдеры, стоп-дистанция/каст, кд скиллов) хранятся в DungeonBot/config.json
--- (вкладка Config: сохранить/загрузить/сброс, автосейв при каждом изменении) и
--- автоматически применяются при старте скрипта.
+-- слайдеры, стоп-дистанция/каст, способности в слотах) хранятся в
+-- DungeonBot/config.json (вкладка Config: сохранить/загрузить/сброс, автосейв
+-- при каждом изменении) и автоматически применяются при старте скрипта.
 -- Авто-старт/реплей данжа (вкладка Auto): в данже бот сам жмёт старт через ремоут
 -- changeStartValue (БЕЗ аргументов — как кнопка игры); после убийства босса ЖДЁТ
 -- появления дропа (rewardGuiHolder.holder), пауза на подбор, затем шлёт
@@ -23,11 +26,12 @@
 -- дальше). Босс-гейты (Northern Lands): точка {pos=.., boss=true} не
 -- засчитывается, пока в bossGateRadius от неё есть живой враг; смерть не
 -- сбрасывает routeIndex — после респавна бот возвращается к гейту.
--- WAIT_SKILLS: скиллы прожались -> бот стоит ровно кд от момента каста -> бежит.
--- Кулдаун — СИГНАЛЬНЫЙ (из дампов Tool'ов): tool.cooldown (NumberValue, сервер)
--- и busyCasting на персонаже — готовность читается из игры, ноль таймеров;
--- потерянная из-за пинга ремотка повторяется сама. Фолбэк timer — по реестру
--- SKILLS, если у Tool'а нет cooldown-значения. Стойка = cooldownLength (6.0).
+-- WAIT_SKILLS: скиллы прожались -> бот стоит cooldownLength от момента каста
+-- (длительность из игры) -> бежит. Кулдаун — СИГНАЛЬНЫЙ (из дампов Tool'ов):
+-- tool.cooldown (NumberValue, сервер) и busyCasting на персонаже — готовность
+-- читается из игры, НОЛЬ ТАЙМЕРОВ (реестра кд больше нет: сервер сам отвечает
+-- готовностью); потерянная из-за пинга ремотка повторяется сама.
+-- Flame Strike бьёт через abilityEvent, Frost Cone — через spellEvent.
 -- Аимлок — ТОЛЬКО телом (камеру не трогаем, игра без шифтлока).
 -- DUO-режим (вкладка Duo): плеер 1 при входе в данж держит полный стоп 6с,
 -- затем стартует (changeStartValue); плеер 2 никогда не стартует сам и стоит
@@ -265,19 +269,40 @@ local cfg = {
 	autoSave = true,
 	autoRestart = true,
 	duoRole = "off",
+	skillSlot1 = "Geyser",
+	skillSlot2 = "Chain Lightning",
 	autoTransfer = true,
 	transferThreshold = 280,
 	highlight = true,
 	showLog = false,
 }
 
--- Реестр скиллов (кд по имени Tool'а; для GUI-слайдеров и конфига).
--- Стреляют ВСЕ Tool'ы с abilityEvent (включая два слота Geyser одновременно).
-local SKILLS = {
-	{ name = "Geyser",          cd = 6.5 },
-	{ name = "Chain Lightning", cd = 4 },
-	{ name = "Life Dash",       cd = 4 },
+-- Список способностей для выбора в слотах (GUI: Способность 1 / Способность 2).
+-- Кулдаун НЕ хранится: готовность читается из сигналов игры (cooldown <= 0
+-- и не busyCasting), таймеров нет вообще. Жмутся только экипированные Tool'ы
+-- с выбранным для слота именем (дубль имени в обоих слотах = все Tool'ы этого
+-- имени жгутся одновременно — два Geyser в Northern Lands).
+-- Flame Strike использует abilityEvent, Frost Cone — spellEvent.
+local SKILL_NAMES = {
+	"Geyser",
+	"Chain Lightning",
+	"Life Dash",
+	"Flame Strike",
+	"Frost Cone",
 }
+
+-- Валидность имени способности для слота: есть в списке либо "none" (выкл).
+local function isValidSkillName(name)
+	if name == "none" then
+		return true
+	end
+	for _, skillName in ipairs(SKILL_NAMES) do
+		if skillName == name then
+			return true
+		end
+	end
+	return false
+end
 
 local bot = {
 	state = "IDLE",
@@ -392,13 +417,6 @@ local function saveConfig()
 	if bot.currentDungeon ~= nil then
 		data.dungeon = bot.currentDungeon
 	end
-	if SKILLS ~= nil then
-		local skills = {}
-		for i, skill in ipairs(SKILLS) do
-			table.insert(skills, { name = skill.name, cd = skill.cd })
-		end
-		data.skills = skills
-	end
 	local ok = pcall(function()
 		local path = configFilePath()
 		writefile(path, game:GetService("HttpService"):JSONEncode(data))
@@ -448,24 +466,23 @@ local function applyConfigData(data)
 		applied += 1
 		log("config: dungeon -> " .. dungeon)
 	end
-	if type(data.skills) == "table" then
-		for _, saved in ipairs(data.skills) do
-			if type(saved) == "table" and type(saved.name) == "string" then
-				for _, skill in ipairs(SKILLS) do
-					if skill.name == saved.name and type(saved.cd) == "number" then
-						skill.cd = saved.cd
-						applied += 1
-						break
-					end
-				end
-			end
-		end
-	end
 	-- Duo-роль: валидация сохранённого значения (строка из config.json).
 	if cfg.duoRole ~= "p1" and cfg.duoRole ~= "p2" then
 		cfg.duoRole = "off"
 	else
 		log("config: duoRole -> " .. cfg.duoRole)
+	end
+	-- Способности в слотах: валидация сохранённых значений по списку.
+	-- "none" = слот выключен; неизвестное имя -> дефолт.
+	if not isValidSkillName(cfg.skillSlot1) then
+		cfg.skillSlot1 = "Geyser"
+	else
+		log("config: skillSlot1 -> " .. cfg.skillSlot1)
+	end
+	if not isValidSkillName(cfg.skillSlot2) then
+		cfg.skillSlot2 = "Chain Lightning"
+	else
+		log("config: skillSlot2 -> " .. cfg.skillSlot2)
 	end
 	-- Порог переноса в сторейдж: диапазон 10–300.
 	if type(cfg.transferThreshold) ~= "number"
@@ -922,27 +939,18 @@ task.spawn(function()
 	end
 end)
 
--- == Скиллы через abilityEvent ремоуты Tool'ов (Backpack/Character) ==
+-- == Скиллы через ремоуты Tool'ов (Backpack/Character) ==
 -- Сигнальный режим (из дампов Tool'ов): внутри каждого скилла есть NumberValue
 -- cooldown (серверный остаток кд) и cooldownLength (полный кд), а на персонаже
 -- busyCasting. Нативный гейт игры: cooldown <= 0 and not busyCasting — читаем
--- готовность прямо из игры, ноль таймеров. Потерянная из-за пинга ремотка
--- повторится сама (сервер кд не включил -> cooldown остался 0).
--- Фолбэк timer: Tool без cooldown-значения — старая логика по кд из SKILLS.
+-- готовность прямо из игры, НОЛЬ ТАЙМЕРОВ (фолбэк-реестра кд нет: сервер сам
+-- отвечает готовностью). Потерянная из-за пинга ремотка повторится сама
+-- (сервер кд не включил -> cooldown остался 0). Стойка = cooldownLength из Tool'а.
+-- Flame Strike бьёт через abilityEvent, Frost Cone — через spellEvent.
 
-local DEFAULT_SKILL_CD = 6.5
 local CAST_DEBOUNCE = 0.5
 
 local skillState = {}
-
-local function skillCdFor(toolName)
-	for _, skill in ipairs(SKILLS) do
-		if skill.name == toolName then
-			return skill.cd
-		end
-	end
-	return DEFAULT_SKILL_CD
-end
 
 -- NumberValue-потомок Tool'а (cooldown / cooldownLength). nil-safe.
 local function toolNumber(tool, name)
@@ -966,18 +974,33 @@ local function isBusyCasting()
 	return false
 end
 
--- Перечисляем ВСЕ Tool'ы с abilityEvent (Backpack + Character): два слота
--- Geyser (Northern Lands) жгутся ОДНОВРЕМЕННО — каждый своим ремоутом.
+-- Перечисляем экипированные Tool'ы, выбранные для слотов (skillSlot1/skillSlot2):
+-- только по ним жмём ремот. Два слота с одним именем (Geyser+Geyser в Northern
+-- Lands) — соберутся ВСЕ Tool'ы этого имени и жгутся одновременно, каждый своим
+-- ремоутом. Ремоут — abilityEvent (Flame Strike) либо spellEvent (Frost Cone).
 -- Кулдаун-стейт по инстансу ремоута — одноимённые скиллы независимы.
 local function getEquippedAbilities()
 	local list = {}
+	local wanted = {}
+	if cfg.skillSlot1 ~= nil and cfg.skillSlot1 ~= "none" then
+		wanted[cfg.skillSlot1] = true
+	end
+	if cfg.skillSlot2 ~= nil and cfg.skillSlot2 ~= "none" then
+		wanted[cfg.skillSlot2] = true
+	end
+	if next(wanted) == nil then
+		return list
+	end
 	local character = LocalPlayer.Character
 	local backpack = LocalPlayer:FindFirstChild("Backpack")
 	for _, container in ipairs({ backpack, character }) do
 		if container ~= nil then
 			for _, tool in ipairs(container:GetChildren()) do
-				if tool:IsA("Tool") then
+				if tool:IsA("Tool") and wanted[tool.Name] then
 					local ev = tool:FindFirstChild("abilityEvent")
+					if ev == nil or not ev:IsA("RemoteEvent") then
+						ev = tool:FindFirstChild("spellEvent")
+					end
 					if ev ~= nil and ev:IsA("RemoteEvent") then
 						table.insert(list, { tool = tool, ev = ev })
 					end
@@ -988,9 +1011,9 @@ local function getEquippedAbilities()
 	return list
 end
 
--- Скиллы: signal (готовность из игры) либо timer (фолбэк по реестру).
--- waitOnSkills -> фиксированная стойка: ровно кд от момента каста
--- (длительность = реальный cooldownLength из игры).
+-- Скиллы: готовность ТОЛЬКО из сигналов игры (cooldown <= 0 and not busyCasting)
+-- + анти-спам дебаунс. Никаких таймеров кд. waitOnSkills -> стойка ровно на
+-- cooldownLength от момента каста (длительность из игры).
 local function fireSkills(now, targetName)
 	local equipped = getEquippedAbilities()
 	local fired = false
@@ -999,11 +1022,7 @@ local function fireSkills(now, targetName)
 		local ev = entry.ev
 		local st = skillState[ev]
 		if st == nil then
-			local cdValue = toolNumber(entry.tool, "cooldownLength")
 			st = {
-				ready = 0,
-				cd = cdValue ~= nil and cdValue or skillCdFor(entry.tool.Name),
-				signal = toolNumber(entry.tool, "cooldown") ~= nil,
 				debouncedUntil = 0,
 				logged = false,
 			}
@@ -1011,34 +1030,27 @@ local function fireSkills(now, targetName)
 		end
 		if not st.logged then
 			st.logged = true
-			log(("skill mode: %s [%s]"):format(entry.tool.Name, st.signal and "signal" or "timer"))
+			log(("skill: %s ready by signal"):format(entry.tool.Name))
 		end
-		local canFire
-		if st.signal then
-			-- Нативный гейт игры + дебаунс (окно репликации cooldown > 0 при пинге).
-			canFire = (toolNumber(entry.tool, "cooldown") or 1) <= 0
-				and not isBusyCasting()
-				and now >= st.debouncedUntil
-		else
-			canFire = now >= st.ready
-		end
+		-- Нативный гейт игры + дебаунс (окно репликации cooldown > 0 при пинге).
+		local canFire = (toolNumber(entry.tool, "cooldown") or 0) <= 0
+			and not isBusyCasting()
+			and now >= st.debouncedUntil
 		if canFire then
 			local ok = pcall(function()
 				ev:FireServer()
 			end)
 			if ok then
 				fired = true
-				if st.signal then
-					-- Только анти-спам окно, НЕ кд: если сервер не принял каст
-					-- (пинг/потеря), cooldown останется 0 и ремотка повторится.
-					st.debouncedUntil = now + CAST_DEBOUNCE
+				-- Только анти-спам окно, НЕ кд: если сервер не принял каст
+				-- (пинг/потеря), cooldown останется 0 и ремотка повторится.
+				st.debouncedUntil = now + CAST_DEBOUNCE
+				-- Длительность стойки = реальный cooldownLength из игры.
+				local cdLen = toolNumber(entry.tool, "cooldownLength")
+				if cdLen ~= nil then
+					maxReady = math.max(maxReady, now + cdLen)
 				end
-				-- Фолбэк-таймер на случай пропажи сигнала + длительность стойки.
-				st.ready = now + st.cd
-				maxReady = math.max(maxReady, st.ready)
-				log(("skill: %s (%.1fs cd) -> %s"):format(entry.tool.Name, st.cd, targetName or (bot.target and bot.target.Name) or "?"))
-			else
-				st.ready = now + 1
+				log(("skill: %s -> %s"):format(entry.tool.Name, targetName or (bot.target and bot.target.Name) or "?"))
 			end
 		end
 	end
@@ -1047,8 +1059,9 @@ local function fireSkills(now, targetName)
 			skillState[ev] = nil
 		end
 	end
-	-- Фиксированное ожидание: ровно кд от момента каста (без продлений).
-	if fired and cfg.waitOnSkills and (bot.waitUntil == nil or now >= bot.waitUntil) then
+	-- Стойка: ровно cooldownLength от момента каста (без таймеров кд).
+	if fired and cfg.waitOnSkills and maxReady > now
+		and (bot.waitUntil == nil or now >= bot.waitUntil) then
 		bot.waitUntil = maxReady
 		log(("wait: skills fired, standing %.1fs"):format(maxReady - now))
 	end
@@ -1404,8 +1417,8 @@ RunService.Heartbeat:Connect(function(deltaTime)
 	end
 
 	-- Ranged-каст: моб в радиусе каста (обычный 90, босс-гейт 80; LOS не
-	-- нужен — боссы за барьерами). Аимлок телом. Скиллы стреляют по своей
-	-- готовности (st.ready) — сразу после истечения кд, без стейт-гейтов.
+	-- нужен — боссы за барьерами). Аимлок телом. Скиллы стреляют по сигналу
+	-- готовности из игры (cooldown <= 0 and not busyCasting) — без таймеров.
 	bot.castTarget = nil
 	if effectiveCastRange() > 0 then
 		local castTarget = findCastTarget(hrp)
@@ -2406,21 +2419,59 @@ task.spawn(function()
 		end,
 	})
 
-	for i, skill in ipairs(SKILLS) do
-		mainTab:CreateSlider({
-			Name = ("Кд скилла: %s"):format(skill.name),
-			Range = { 0.5, 30 },
-			Increment = 0.1,
-			Suffix = "s",
-			CurrentValue = skill.cd,
-			Flag = "dbot_skillcd_" .. i,
-			Callback = function(value)
-				skill.cd = value
-				log(("skill cd %s: %.1fs"):format(skill.name, value))
-				scheduleSave()
-			end,
-		})
+	local skillOptions = { "Нет" }
+	for _, name in ipairs(SKILL_NAMES) do
+		table.insert(skillOptions, name)
 	end
+
+	local function slotCurrentValue(value)
+		if value == nil or value == "none" then
+			return "Нет"
+		end
+		return value
+	end
+
+	mainTab:CreateDropdown({
+		Name = "Способность 1 (слот Q)",
+		Options = skillOptions,
+		CurrentValue = slotCurrentValue(cfg.skillSlot1),
+		Flag = "dbot_skillslot1",
+		Callback = function(option)
+			local name = option
+			if typeof(option) == "table" then
+				name = option[1] or option.CurrentValue
+			end
+			if name == "Нет" or name == nil then
+				cfg.skillSlot1 = "none"
+			else
+				cfg.skillSlot1 = name
+			end
+			skillState = {}
+			log("skill slot 1: " .. tostring(cfg.skillSlot1))
+			scheduleSave()
+		end,
+	})
+
+	mainTab:CreateDropdown({
+		Name = "Способность 2 (слот E)",
+		Options = skillOptions,
+		CurrentValue = slotCurrentValue(cfg.skillSlot2),
+		Flag = "dbot_skillslot2",
+		Callback = function(option)
+			local name = option
+			if typeof(option) == "table" then
+				name = option[1] or option.CurrentValue
+			end
+			if name == "Нет" or name == nil then
+				cfg.skillSlot2 = "none"
+			else
+				cfg.skillSlot2 = name
+			end
+			skillState = {}
+			log("skill slot 2: " .. tostring(cfg.skillSlot2))
+			scheduleSave()
+		end,
+	})
 
 	mainTab:CreateSlider({
 		Name = "Интервал репаса",
@@ -2669,7 +2720,7 @@ task.spawn(function()
 	pcall(function()
 		configTab:CreateParagraph({
 			Title = "Сохранение настроек",
-			Content = "Конфиг хранится в DungeonBot/config.json (папка executor'а) и автоматически загружается при старте скрипта: выбранный данж, мастер-вкл, стоп-дистанция, каст, все тумблеры и слайдеры. Каждое изменение сохраняется через секунду автоматически. «Загрузить» применяется к логике сразу, но отображение GUI обновится после перезапуска скрипта.",
+			Content = "Конфиг хранится в DungeonBot/config.json (папка executor'а) и автоматически загружается при старте скрипта: выбранный данж, мастер-вкл, стоп-дистанция, каст, способности в слотах, все тумблеры и слайдеры. Каждое изменение сохраняется через секунду автоматически. «Загрузить» применяется к логике сразу, но отображение GUI обновится после перезапуска скрипта.",
 		})
 	end)
 
