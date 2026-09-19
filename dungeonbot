@@ -289,6 +289,7 @@ local SKILL_NAMES = {
 	"Life Dash",
 	"Flame Strike",
 	"Frost Cone",
+	"Flame Shuriken",
 }
 
 -- Валидность имени способности для слота: есть в списке либо "none" (выкл).
