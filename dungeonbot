@@ -42,6 +42,9 @@
 -- оба респаунятся и продолжают цикл; edge-детект + кулдаун 5с от пинг-понга.
 -- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
 -- Если Rayfield не загрузился — переключение бота клавишей B.
+-- Авто-скрытие меню (тумблер hideOnExecute, вкладка Config): при экзекуе меню
+-- не показывается ВООБЩЕ (ScreenGui выключается до интро Rayfield, затем
+-- корректно переводится в Hidden) — K поднимет его обратно. По умолчанию выкл.
 -- Авто-перезапуск (только онлайн): queue_on_teleport грузит скрипт по
 -- REMOTE_URL (GitHub raw) — после телепорта/перезахода бот поднимается сам;
 -- тумблер autoRestart (вкладка Config) включает/выключает, постановка — после
@@ -273,6 +276,7 @@ local cfg = {
 	autoRestart = true,
 	duoRole = "off",
 	duoDeathSync = false,
+	hideOnExecute = false,
 	skillSlot1 = "Geyser",
 	skillSlot2 = "Chain Lightning",
 	autoTransfer = true,
@@ -2294,6 +2298,35 @@ task.spawn(function()
 		return
 	end
 
+	-- == Авто-скрытие меню при экзекуе (cfg.hideOnExecute) ==
+	-- CreateWindow синхронно проигрывает интро (~3.5с: баннер -> раскрытие),
+	-- поэтому SetVisibility после него даст вспышку. Двухфазная схема:
+	-- 1) разведчик-поток ДО CreateWindow: как только Rayfield создаст свой
+	--    ScreenGui (а это происходит в самом начале CreateWindow) — ставит
+	--    ему Enabled = false. Пользователь не видит вообще ничего.
+	-- 2) ПОСЛЕ CreateWindow: Rayfield:SetVisibility(false) — синхронно
+	--    (к возврату Main.Visible = false, Hidden = true), затем ScreenGui
+	--    возвращается обратно (Enabled = true) — ОБЯЗАТЕЛЬНО, иначе K
+	--    (внутренний хоткей Rayfield) не поднимет меню через Unhide.
+	-- Разведчик самоотменяется по hidePhaseDone, если не успел вовремя.
+	local hidePhaseDone = false
+	if cfg.hideOnExecute then
+		task.spawn(function()
+			local container = (gethui ~= nil and gethui()) or game:GetService("CoreGui")
+			for _ = 1, 120 do
+				if hidePhaseDone then
+					return
+				end
+				local gui = container:FindFirstChild("Rayfield")
+				if gui ~= nil then
+					gui.Enabled = false
+					return
+				end
+				task.wait(0.05)
+			end
+		end)
+	end
+
 	local window = Rayfield:CreateWindow({
 		Name = "Dungeon Test Bot",
 		LoadingTitle = "Dungeon Test Bot",
@@ -2303,6 +2336,22 @@ task.spawn(function()
 		},
 		KeySystem = false,
 	})
+
+	if cfg.hideOnExecute then
+		hidePhaseDone = true
+		pcall(function()
+			Rayfield:SetVisibility(false)
+		end)
+		-- ScreenGui был отключён разведчиком до интро — возвращаем: окно уже
+		-- скрыто через Main.Visible = false / Hidden, рендера нет, а K теперь
+		-- сможет его показать (Unhide не трогает Enabled ScreenGui).
+		local container = (gethui ~= nil and gethui()) or game:GetService("CoreGui")
+		local gui = container:FindFirstChild("Rayfield")
+		if gui ~= nil then
+			gui.Enabled = true
+		end
+		log("ui: hidden on execute (press K to show)")
+	end
 
 	local mainTab = window:CreateTab("Main", 4483362458)
 	local storageTab = window:CreateTab("Storage", 4483362458)
@@ -2775,6 +2824,17 @@ task.spawn(function()
 		end,
 	})
 
+	configTab:CreateToggle({
+		Name = "Прятать меню при загрузке (K — показать)",
+		CurrentValue = cfg.hideOnExecute,
+		Flag = "dbot_hideonexecute",
+		Callback = function(value)
+			cfg.hideOnExecute = value
+			log("hide on execute: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
 	configTab:CreateButton({
 		Name = "Сбросить конфиг к дефолтам (удалить файл)",
 		Callback = function()
@@ -2834,6 +2894,13 @@ task.spawn(function()
 		configTab:CreateParagraph({
 			Title = "Сохранение настроек",
 			Content = "Конфиг хранится в DungeonBot/config.json (папка executor'а) и автоматически загружается при старте скрипта: выбранный данж, мастер-вкл, стоп-дистанция, каст, способности в слотах, все тумблеры и слайдеры. Каждое изменение сохраняется через секунду автоматически. «Загрузить» применяется к логике сразу, но отображение GUI обновится после перезапуска скрипта.",
+		})
+	end)
+
+	pcall(function()
+		configTab:CreateParagraph({
+			Title = "Авто-скрытие меню",
+			Content = "Тумблер «Прятать меню при загрузке» делает так, чтобы при экзекуе (и при авто-перезапуске после телепорта) меню Rayfield НЕ появлялось на экране вообще — ни интро, ни самой панели. Действует со следующего запуска скрипта; текущее меню спрячет/покажет клавиша K (встроенный хоткей Rayfield).",
 		})
 	end)
 
