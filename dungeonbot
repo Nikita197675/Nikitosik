@@ -37,6 +37,9 @@
 -- затем стартует (changeStartValue); плеер 2 никогда не стартует сам и стоит
 -- до серверной репликации dungeonStarted == true (первый стартанул).
 -- Роль хранится в конфиге (duoRole: off/p1/p2) — переживает реплей-телепорт.
+-- Death-sync (отдельный тумблер duoDeathSync, без привязки к роли): партнёр
+-- умер в данже — мой перс умирает вместе с ним (Health=0 + BreakJoints),
+-- оба респаунятся и продолжают цикл; edge-детект + кулдаун 5с от пинг-понга.
 -- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
 -- Если Rayfield не загрузился — переключение бота клавишей B.
 -- Авто-перезапуск (только онлайн): queue_on_teleport грузит скрипт по
@@ -269,6 +272,7 @@ local cfg = {
 	autoSave = true,
 	autoRestart = true,
 	duoRole = "off",
+	duoDeathSync = false,
 	skillSlot1 = "Geyser",
 	skillSlot2 = "Chain Lightning",
 	autoTransfer = true,
@@ -346,6 +350,15 @@ local bot = {
 	duoHoldUntil = nil,
 	duoWaitLoggedAt = 0,
 	duoHoldLoggedAt = 0,
+}
+
+-- Состояние синхронизации смерти (Duo): partner — кешированный игрок-партнёр,
+-- wasAlive — edge-детект живой->мёртвый, resetAt — кулдаун после сброса
+-- (защита от пинг-понга ресетов, когда оба бота смотрят друг на друга).
+local duoSync = {
+	partner = nil,
+	wasAlive = false,
+	resetAt = 0,
 }
 
 local function rand(a, b)
@@ -1922,6 +1935,85 @@ task.spawn(function()
 	end
 end)
 
+-- == Синхронизация смерти (вкладка Duo: независимый тумблер duoDeathSync) ==
+-- Если партнёр умер — мой персонаж умирает вместе с ним (reset character),
+-- оба респаунятся и продолжают цикл. Работает БЕЗ привязки к duoRole.
+-- Детект: edge-переход живой -> мёртвый по Humanoid.Health партнёра
+-- (нужно предварительно увидеть его живым — не срабатывает на трупе при
+-- загрузке). Сброс: Health = 0, фолбэк BreakJoints через 0.15с (клиент
+-- владеет своими частями — реплицируется). Кулдаун DUO_SYNC_COOLDOWN после
+-- сброса гасит пинг-понг ресетов между двумя ботами.
+
+local DUO_SYNC_COOLDOWN = 5
+
+local function findDuoPartner()
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player ~= LocalPlayer then
+			return player
+		end
+	end
+	return nil
+end
+
+local function resetOwnCharacter()
+	local character = LocalPlayer.Character
+	if character == nil then
+		return
+	end
+	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	if humanoid == nil or humanoid.Health <= 0 then
+		return
+	end
+	humanoid.Health = 0
+	-- Фолбэк: если здоровье сервер-авторитарно и не обнулилось — ломаем суставы
+	-- (клиент владеет своими частями, BreakJoints реплицируется серверу).
+	task.delay(0.15, function()
+		local char = LocalPlayer.Character
+		if char == nil then
+			return
+		end
+		local hum = char:FindFirstChildOfClass("Humanoid")
+		if hum ~= nil and hum.Health > 0 then
+			char:BreakJoints()
+		end
+	end)
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		if not cfg.enabled or not cfg.duoDeathSync or not inDungeonNow() then
+			duoSync.partner = nil
+			duoSync.wasAlive = false
+		else
+			local partner = duoSync.partner
+			if partner == nil or partner.Parent == nil then
+				partner = findDuoPartner()
+				duoSync.partner = partner
+				duoSync.wasAlive = false
+			end
+			if partner ~= nil then
+				local character = partner.Character
+				local humanoid = character ~= nil and character:FindFirstChildOfClass("Humanoid") or nil
+				if humanoid == nil then
+					duoSync.wasAlive = false
+				elseif humanoid.Health > 0 then
+					duoSync.wasAlive = true
+				elseif duoSync.wasAlive then
+					-- Партнёр только что умер — ресаем своего перса.
+					duoSync.wasAlive = false
+					local now = os.clock()
+					if now - duoSync.resetAt >= DUO_SYNC_COOLDOWN then
+						duoSync.resetAt = now
+						log("duo: partner died, resetting own character")
+						resetOwnCharacter()
+					end
+				end
+			end
+		end
+	end
+end)
+
 -- == Авто-перенос инвентаря в сторейдж (вкладка Storage) ==
 -- Данные из ремоутов (по дампам игры): reloadInvy / getPlayerStorage ->
 -- {weapons, abilities, chests, helmets} с ключами вида "weapon_123".
@@ -2632,6 +2724,26 @@ task.spawn(function()
 			scheduleSave()
 		end,
 	})
+
+	duoTab:CreateToggle({
+		Name = "Синхронизация смерти (партнёр умер — я тоже)",
+		CurrentValue = cfg.duoDeathSync,
+		Flag = "dbot_duodeathsync",
+		Callback = function(value)
+			cfg.duoDeathSync = value
+			duoSync.partner = nil
+			duoSync.wasAlive = false
+			log("duo: death sync -> " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	pcall(function()
+		duoTab:CreateParagraph({
+			Title = "Синхронизация смерти",
+			Content = "Независимый тумблер (работает без выбора роли). В данже бот следит за другим игроком: как только партнёр умирает — персонаж бота умирает вместе с ним (reset character), оба респаунятся и продолжают цикл. Защита от ложных срабатываний: смерть засчитывается только после того, как партнёр был замечен живым; кулдаун 5с после сброса гасит пинг-понг ресетов между двумя ботами.",
+		})
+	end)
 
 	configTab:CreateButton({
 		Name = "Сохранить конфиг сейчас",
