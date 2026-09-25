@@ -40,6 +40,11 @@
 -- Death-sync (отдельный тумблер duoDeathSync, без привязки к роли): партнёр
 -- умер в данже — мой перс умирает вместе с ним (Health=0 + BreakJoints),
 -- оба респаунятся и продолжают цикл; edge-детект + кулдаун 5с от пинг-понга.
+-- Сейвер (отдельный тумблер duoSaver, без привязки к роли): работает ВСЕГДА,
+-- даже при выключенном мастере. 3 поля UserId (saverId1/2/3) — белый список.
+-- Если на сервере есть игрок, не совпадающий ни с одним вписанным ID —
+-- LocalPlayer:Kick("saved"). Вписано 3, онлайн меньше — продолжаем (не кикаем);
+-- свой UserId тоже надо вписать, иначе кикнет самого себя. Поля: только числа.
 -- Запуск: executor'ом. GUI: Rayfield (loadstring подтягивается сам).
 -- Если Rayfield не загрузился — переключение бота клавишей B.
 -- Авто-скрытие меню (тумблер hideOnExecute, вкладка Config): при экзекуе меню
@@ -276,6 +281,10 @@ local cfg = {
 	autoRestart = true,
 	duoRole = "off",
 	duoDeathSync = false,
+	duoSaver = false,
+	saverId1 = "",
+	saverId2 = "",
+	saverId3 = "",
 	hideOnExecute = false,
 	skillSlot1 = "Geyser",
 	skillSlot2 = "Chain Lightning",
@@ -1306,6 +1315,9 @@ local function updateInfo(now)
 	elseif cfg.duoRole == "p2" then
 		duoText = " | duo: p2 waiting"
 	end
+	if cfg.duoSaver then
+		duoText = duoText .. " | saver"
+	end
 	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d%s"):format(
 		cfg.enabled and bot.state or "off",
 		speedText,
@@ -2013,6 +2025,71 @@ task.spawn(function()
 						resetOwnCharacter()
 					end
 				end
+			end
+		end
+	end
+end)
+
+-- == Сейвер (вкладка Duo: независимый тумблер duoSaver) ==
+-- Работает ВСЕГДА — без привязки к мастер-вкл и роли в дуо. Белый список из
+-- 3 UserId (saverId1/2/3 во вкладке Duo). Раз в секунду перебираем игроков:
+-- нашли человека, чей UserId не совпадает ни с одним вписанным — кикаем
+-- СВОЕГО перса с причиной "saved" (LocalPlayer:Kick). Вписано 3, а онлайн
+-- меньше — НЕ кикаем (список не обязан быть полностью в онлайне). Свой
+-- UserId тоже нужно вписать — иначе кикнет самого себя при старте. Пустые
+-- и нечисловые поля игнорируются; если список пуст — сейвер не активен.
+
+local duoCheck = {
+	offender = nil,
+	loggedAt = 0,
+}
+
+-- Собирает set валидных UserId из конфига: { [userId] = true }.
+local function collectSaverIds()
+	local ids = {}
+	for _, key in ipairs({ "saverId1", "saverId2", "saverId3" }) do
+		local raw = cfg[key]
+		if type(raw) == "string" or type(raw) == "number" then
+			local n = tonumber(tostring(raw):gsub("%s+", ""))
+			if n ~= nil and n == math.floor(n) and n > 0 then
+				ids[n] = true
+			end
+		end
+	end
+	return ids
+end
+
+task.spawn(function()
+	while true do
+		task.wait(1)
+		if not cfg.duoSaver then
+			duoCheck.offender = nil
+		else
+			local allowed = collectSaverIds()
+			local offender = nil
+			for _, player in ipairs(Players:GetPlayers()) do
+				if not allowed[player.UserId] then
+					offender = player
+					break
+				end
+			end
+			if offender ~= nil then
+				if duoCheck.offender ~= offender then
+					duoCheck.offender = offender
+					duoCheck.loggedAt = os.clock()
+					log(("duo: saver: stranger %s (%d) online, kicking (saved)"):format(
+						tostring(offender.Name), offender.UserId))
+				end
+				-- Кик всегда (упавший в прошлый раз повторится), лог — редко.
+				local ok = pcall(function()
+					LocalPlayer:Kick("saved")
+				end)
+				if not ok and os.clock() - duoCheck.loggedAt > 10 then
+					duoCheck.loggedAt = os.clock()
+					log("duo: kick failed, retrying")
+				end
+			else
+				duoCheck.offender = nil
 			end
 		end
 	end
@@ -2791,6 +2868,78 @@ task.spawn(function()
 		duoTab:CreateParagraph({
 			Title = "Синхронизация смерти",
 			Content = "Независимый тумблер (работает без выбора роли). В данже бот следит за другим игроком: как только партнёр умирает — персонаж бота умирает вместе с ним (reset character), оба респаунятся и продолжают цикл. Защита от ложных срабатываний: смерть засчитывается только после того, как партнёр был замечен живым; кулдаун 5с после сброса гасит пинг-понг ресетов между двумя ботами.",
+		})
+	end)
+
+	duoTab:CreateToggle({
+		Name = "Сейвер (кик себя при чужом онлайне)",
+		CurrentValue = cfg.duoSaver,
+		Flag = "dbot_duoSaver",
+		Callback = function(value)
+			cfg.duoSaver = value
+			log(("duo: saver -> %s"):format(tostring(value)))
+			scheduleSave()
+		end,
+	})
+
+	duoTab:CreateInput({
+		Name = "ID друга 1",
+		CurrentValue = cfg.saverId1,
+		PlaceholderText = "UserId",
+		ClearOnFocus = false,
+		Flag = "dbot_saverId1",
+		Callback = function(text)
+			local n = tonumber(tostring(text):gsub("%s+", ""))
+			if n ~= nil and n == math.floor(n) and n > 0 then
+				cfg.saverId1 = tostring(n)
+			else
+				cfg.saverId1 = ""
+				log("duo: bad saver id 1: " .. tostring(text))
+			end
+			scheduleSave()
+		end,
+	})
+
+	duoTab:CreateInput({
+		Name = "ID друга 2",
+		CurrentValue = cfg.saverId2,
+		PlaceholderText = "UserId",
+		ClearOnFocus = false,
+		Flag = "dbot_saverId2",
+		Callback = function(text)
+			local n = tonumber(tostring(text):gsub("%s+", ""))
+			if n ~= nil and n == math.floor(n) and n > 0 then
+				cfg.saverId2 = tostring(n)
+			else
+				cfg.saverId2 = ""
+				log("duo: bad saver id 2: " .. tostring(text))
+			end
+			scheduleSave()
+		end,
+	})
+
+	duoTab:CreateInput({
+		Name = "ID друга 3",
+		CurrentValue = cfg.saverId3,
+		PlaceholderText = "UserId",
+		ClearOnFocus = false,
+		Flag = "dbot_saverId3",
+		Callback = function(text)
+			local n = tonumber(tostring(text):gsub("%s+", ""))
+			if n ~= nil and n == math.floor(n) and n > 0 then
+				cfg.saverId3 = tostring(n)
+			else
+				cfg.saverId3 = ""
+				log("duo: bad saver id 3: " .. tostring(text))
+			end
+			scheduleSave()
+		end,
+	})
+
+	pcall(function()
+		duoTab:CreateParagraph({
+			Title = "Сейвер",
+			Content = "Независимый тумблер — работает ВСЕГДА, даже при выключенном мастере и без выбора роли. Белый список: 3 поля с UserId друзей. Если на сервере появляется игрок, которого НЕТ в списке — бот кикает сам себя с причиной «saved». Вписано 3, а онлайн меньше — бот продолжает работать (список не обязан быть полностью в онлайне). Свой собственный UserId тоже нужно вписать, иначе бот кикнет сам себя при старте. Пустые и нечисловые поля игнорируются; если список пуст — сейвер не активен. Настройки сохраняются в конфиг.",
 		})
 	end)
 
