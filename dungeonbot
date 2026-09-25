@@ -2050,7 +2050,11 @@ local function collectSaverIds()
 	for _, key in ipairs({ "saverId1", "saverId2", "saverId3" }) do
 		local raw = cfg[key]
 		if type(raw) == "string" or type(raw) == "number" then
-			local n = tonumber(tostring(raw):gsub("%s+", ""))
+			-- gsub возвращает (строка, кол-во замен): присвоение в локал
+			-- обрезает multiple-return до одного значения, иначе tonumber
+			-- примет кол-во замен как base системы счисления -> error.
+			local cleaned = tostring(raw):gsub("%s+", "")
+			local n = tonumber(cleaned)
 			if n ~= nil and n == math.floor(n) and n > 0 then
 				ids[n] = true
 			end
@@ -2889,7 +2893,8 @@ task.spawn(function()
 		ClearOnFocus = false,
 		Flag = "dbot_saverId1",
 		Callback = function(text)
-			local n = tonumber(tostring(text):gsub("%s+", ""))
+			local cleaned = tostring(text):gsub("%s+", "")
+			local n = tonumber(cleaned)
 			if n ~= nil and n == math.floor(n) and n > 0 then
 				cfg.saverId1 = tostring(n)
 			else
@@ -2907,7 +2912,8 @@ task.spawn(function()
 		ClearOnFocus = false,
 		Flag = "dbot_saverId2",
 		Callback = function(text)
-			local n = tonumber(tostring(text):gsub("%s+", ""))
+			local cleaned = tostring(text):gsub("%s+", "")
+			local n = tonumber(cleaned)
 			if n ~= nil and n == math.floor(n) and n > 0 then
 				cfg.saverId2 = tostring(n)
 			else
@@ -2925,7 +2931,8 @@ task.spawn(function()
 		ClearOnFocus = false,
 		Flag = "dbot_saverId3",
 		Callback = function(text)
-			local n = tonumber(tostring(text):gsub("%s+", ""))
+			local cleaned = tostring(text):gsub("%s+", "")
+			local n = tonumber(cleaned)
 			if n ~= nil and n == math.floor(n) and n > 0 then
 				cfg.saverId3 = tostring(n)
 			else
