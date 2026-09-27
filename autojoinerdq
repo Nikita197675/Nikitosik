@@ -1,1 +1,428 @@
+-- autojoiner.lua — авто-джойнер к игроку по нику (лобби) + выход в лобби по G.
+-- Лобби (PlaceId 77649408247578): своя лёгкая GUI — поле ввода ника, тумблер
+-- Auto-Join, статус, Unload. Раз в 2с (пока не в лобби/пати) отправляет
+-- join-request к указанному нику: выставляет ник в родное поле
+-- queueGui.gameSearch.joinRequest.usernameField.usernameBox и «нажимает»
+-- кнопку sendRequest.TextButton (getconnections/firesignal) — родной
+-- контроллер игры сам зовёт remotes.sendJoinRequest:InvokeServer(ник, false).
+-- Фолбэк (нет firesignal/getconnections или кнопки): прямой InvokeServer.
+-- Не-лобби (данж и пр.): клавиша G -> выход в лобби через remotes.teleToLobby
+-- (фолбэк leaveGame), оба FireServer без аргументов.
+-- Авто-лоад после телепорта: queue_on_teleport тянет скрипт по REMOTE_URL,
+-- один и тот же скрипт ветвится по PlaceId.
 
+if _G.__AUTOJOINER_ACTIVE then
+	return
+end
+_G.__AUTOJOINER_ACTIVE = true
+
+-- Авто-лоад после телепорта: скрипт тянется по REMOTE_URL (публичный raw).
+local REMOTE_URL = "https://raw.githubusercontent.com/Nikita197675/Nikitosik/refs/heads/main/autojoinerdq"
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local LOBBY_PLACE_ID = 77649408247578
+local RETRY = 2
+
+-- == Авто-лоад после телепорта (queue_on_teleport) ==
+local function queueTeleport(str)
+	local fn = queue_on_teleport or queueonteleport
+		or (getgenv and (getgenv().queue_on_teleport or getgenv().queueonteleport))
+	if fn == nil then
+		return false
+	end
+	local ok = pcall(fn, str)
+	return ok
+end
+
+if REMOTE_URL ~= "" then
+	local loader = ([[
+		repeat task.wait(0.1) until game:IsLoaded()
+		local Players = game:GetService("Players")
+		while Players.LocalPlayer == nil do
+			task.wait(0.1)
+		end
+		task.wait(2)
+		for _ = 1, 10 do
+			local ok = pcall(function()
+				loadstring(game:HttpGet(%q))()
+			end)
+			if ok then
+				return
+			end
+			task.wait(1)
+		end
+	]]):format(REMOTE_URL)
+	queueTeleport(loader)
+end
+
+-- == Общие хелперы ==
+
+-- Родитель для GUI: PlayerGui. НЕ используем gethui()/CoreGui — это
+-- защищённые контейнеры (нужна capability Plugin), и после «нажатия» родной
+-- кнопки через getconnections identity потока падает, из-за чего доступ к
+-- таким Instance'ам роняет цикл. PlayerGui доступен при любой identity.
+local function guiParent()
+	return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+local conns = {}
+local function track(conn)
+	table.insert(conns, conn)
+	return conn
+end
+
+-- Прямой вызов ремоута (фолбэк, если кнопку/сигнал нажать нельзя).
+local function sendJoinDirect(name)
+	local remotes = ReplicatedStorage:FindFirstChild("remotes")
+	local r = remotes ~= nil and remotes:FindFirstChild("sendJoinRequest") or nil
+	if r ~= nil and r:IsA("RemoteFunction") then
+		task.spawn(function()
+			pcall(function()
+				r:InvokeServer(name, false)
+			end)
+		end)
+		return "remote"
+	end
+	return nil
+end
+
+-- «Нажать» кнопку игры: воспроизводим её подключённые обработчики.
+local function fireButton(button)
+	local sig = button.MouseButton1Click
+	if getconnections ~= nil then
+		local ok, list = pcall(getconnections, sig)
+		if ok and list ~= nil then
+			local fired = false
+			for _, c in ipairs(list) do
+				pcall(function()
+					c:Fire()
+				end)
+				fired = true
+			end
+			if fired then
+				return true
+			end
+		end
+	end
+	if firesignal ~= nil then
+		local ok = pcall(firesignal, sig)
+		if ok then
+			return true
+		end
+	end
+	return false
+end
+
+-- Уже в собранном лобби/данже? (логика из клиента игры: workspace.games)
+local function inLobbyOrGame(player)
+	local games = workspace:FindFirstChild("games")
+	if games == nil then
+		return false
+	end
+	for _, folderName in ipairs({ "inGame", "inLobby" }) do
+		local folder = games:FindFirstChild(folderName)
+		if folder ~= nil then
+			for _, child in ipairs(folder:GetChildren()) do
+				if child:FindFirstChild(player.Name) ~= nil then
+					return true
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- Путь к родному полю ввода / кнопке join-request (nil-safe).
+local function findJoinRequestUI()
+	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if playerGui == nil then
+		return nil, nil
+	end
+	local queueGui = playerGui:FindFirstChild("queueGui")
+	if queueGui == nil then
+		return nil, nil
+	end
+	local gameSearch = queueGui:FindFirstChild("gameSearch")
+	if gameSearch == nil then
+		return nil, nil
+	end
+	local joinRequest = gameSearch:FindFirstChild("joinRequest")
+	if joinRequest == nil then
+		return nil, nil
+	end
+	local usernameField = joinRequest:FindFirstChild("usernameField")
+	local box = usernameField ~= nil and usernameField:FindFirstChild("usernameBox") or nil
+	local sendRequest = joinRequest:FindFirstChild("sendRequest")
+	local btn = sendRequest ~= nil and sendRequest:FindFirstChild("TextButton") or nil
+	return box, btn
+end
+
+-- Одна попытка присоединения по нику. Возвращает способ ("button"/"remote") или nil.
+-- Нажатие кнопки делаем в ОТДЕЛЬНОМ потоке: getconnections():Fire() роняет
+-- identity текущего потока (родная кнопка = game-скрипт без capability),
+-- и это не должно утекать в цикл, который потом трогает наш GUI.
+local function tryJoin(name)
+	local box, btn = findJoinRequestUI()
+	if box ~= nil and btn ~= nil and (getconnections ~= nil or firesignal ~= nil) then
+		box.Text = name
+		task.spawn(function()
+			pcall(fireButton, btn)
+		end)
+		return "button"
+	end
+	return sendJoinDirect(name)
+end
+
+-- == Ветка ЛОББИ: GUI + авто-джойн ==
+local function runLobby()
+	local state = { enabled = false }
+
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "AutoJoinerGui"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 200
+	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.Parent = guiParent()
+
+	local main = Instance.new("Frame")
+	main.Size = UDim2.fromOffset(260, 176)
+	main.Position = UDim2.fromScale(0.5, 0.4)
+	main.AnchorPoint = Vector2.new(0.5, 0.5)
+	main.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+	main.BorderSizePixel = 0
+	main.Parent = gui
+	local mainCorner = Instance.new("UICorner")
+	mainCorner.CornerRadius = UDim.new(0, 8)
+	mainCorner.Parent = main
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(1, 0, 0, 28)
+	title.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+	title.BorderSizePixel = 0
+	title.Text = "Auto Joiner"
+	title.TextColor3 = Color3.fromRGB(235, 235, 235)
+	title.Font = Enum.Font.GothamBold
+	title.TextSize = 14
+	title.Parent = main
+	local titleCorner = Instance.new("UICorner")
+	titleCorner.CornerRadius = UDim.new(0, 8)
+	titleCorner.Parent = title
+
+	local box = Instance.new("TextBox")
+	box.Size = UDim2.new(1, -20, 0, 30)
+	box.Position = UDim2.fromOffset(10, 38)
+	box.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
+	box.BorderSizePixel = 0
+	box.PlaceholderText = "Ник игрока"
+	box.Text = ""
+	box.ClearTextOnFocus = false
+	box.TextColor3 = Color3.fromRGB(235, 235, 235)
+	box.PlaceholderColor3 = Color3.fromRGB(140, 140, 150)
+	box.Font = Enum.Font.Gotham
+	box.TextSize = 14
+	box.Parent = main
+	local boxCorner = Instance.new("UICorner")
+	boxCorner.CornerRadius = UDim.new(0, 6)
+	boxCorner.Parent = box
+
+	local toggle = Instance.new("TextButton")
+	toggle.Size = UDim2.new(1, -20, 0, 30)
+	toggle.Position = UDim2.fromOffset(10, 76)
+	toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
+	toggle.BorderSizePixel = 0
+	toggle.Text = "Auto-Join: OFF"
+	toggle.TextColor3 = Color3.fromRGB(235, 235, 235)
+	toggle.Font = Enum.Font.GothamBold
+	toggle.TextSize = 14
+	toggle.AutoButtonColor = true
+	toggle.Parent = main
+	local toggleCorner = Instance.new("UICorner")
+	toggleCorner.CornerRadius = UDim.new(0, 6)
+	toggleCorner.Parent = toggle
+
+	local status = Instance.new("TextLabel")
+	status.Size = UDim2.new(1, -20, 0, 26)
+	status.Position = UDim2.fromOffset(10, 112)
+	status.BackgroundTransparency = 1
+	status.Text = "готов"
+	status.TextColor3 = Color3.fromRGB(170, 190, 210)
+	status.Font = Enum.Font.Code
+	status.TextSize = 12
+	status.TextXAlignment = Enum.TextXAlignment.Left
+	status.TextTruncate = Enum.TextTruncate.AtEnd
+	status.Parent = main
+
+	local unloadBtn = Instance.new("TextButton")
+	unloadBtn.Size = UDim2.new(1, -20, 0, 26)
+	unloadBtn.Position = UDim2.fromOffset(10, 142)
+	unloadBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+	unloadBtn.BorderSizePixel = 0
+	unloadBtn.Text = "Unload"
+	unloadBtn.TextColor3 = Color3.fromRGB(220, 180, 180)
+	unloadBtn.Font = Enum.Font.Gotham
+	unloadBtn.TextSize = 13
+	unloadBtn.Parent = main
+	local unloadCorner = Instance.new("UICorner")
+	unloadCorner.CornerRadius = UDim.new(0, 6)
+	unloadCorner.Parent = unloadBtn
+
+	local function setStatus(text)
+		pcall(function()
+			status.Text = tostring(text)
+		end)
+	end
+
+	-- Перетаскивание за заголовок.
+	do
+		local dragging = false
+		local dragStart, startPos
+		track(title.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = main.Position
+			end
+		end))
+		track(UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				main.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end))
+		track(UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end))
+	end
+
+	track(toggle.MouseButton1Click:Connect(function()
+		state.enabled = not state.enabled
+		if state.enabled then
+			toggle.Text = "Auto-Join: ON"
+			toggle.BackgroundColor3 = Color3.fromRGB(45, 80, 55)
+			setStatus("поиск...")
+		else
+			toggle.Text = "Auto-Join: OFF"
+			toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
+			setStatus("остановлено")
+		end
+	end))
+
+	local function unload()
+		_G.__AUTOJOINER_ACTIVE = false
+		state.enabled = false
+		for _, c in ipairs(conns) do
+			pcall(function()
+				c:Disconnect()
+			end)
+		end
+		if gui ~= nil then
+			gui:Destroy()
+		end
+	end
+	track(unloadBtn.MouseButton1Click:Connect(unload))
+
+	-- Основной цикл: раз в RETRY секунд шлём join-request к нику из поля.
+	-- Итерация в pcall — ошибка (например капабилити/identity) не убивает цикл.
+	task.spawn(function()
+		while _G.__AUTOJOINER_ACTIVE do
+			task.wait(RETRY)
+			if state.enabled then
+				pcall(function()
+					local target = box.Text:gsub("^%s+", ""):gsub("%s+$", "")
+					if target == "" then
+						setStatus("введи ник")
+					elseif inLobbyOrGame(LocalPlayer) then
+						setStatus("уже в лобби/пати")
+					else
+						local via = tryJoin(target)
+						if via ~= nil then
+							setStatus(("запрос -> %s (%s)"):format(target, via))
+						else
+							setStatus("не найдено: UI/remote")
+						end
+					end
+				end)
+			end
+		end
+	end)
+end
+
+-- == Ветка НЕ-ЛОББИ: клавиша G -> выход в лобби ==
+local function runOther()
+	local function leaveToLobby()
+		local remotes = ReplicatedStorage:FindFirstChild("remotes")
+		if remotes == nil then
+			return
+		end
+		local tl = remotes:FindFirstChild("teleToLobby")
+		if tl ~= nil and tl:IsA("RemoteEvent") then
+			pcall(function()
+				tl:FireServer()
+			end)
+			return
+		end
+		local lg = remotes:FindFirstChild("leaveGame")
+		if lg ~= nil and lg:IsA("RemoteEvent") then
+			pcall(function()
+				lg:FireServer()
+			end)
+		end
+	end
+
+	track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+		if gameProcessedEvent then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() ~= nil then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.G then
+			leaveToLobby()
+		end
+	end))
+
+	-- Короткий тост-хинт.
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "AutoJoinerHint"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 200
+	gui.Parent = guiParent()
+	local hint = Instance.new("TextLabel")
+	hint.Size = UDim2.fromOffset(180, 26)
+	hint.Position = UDim2.new(0.5, -90, 0, 8)
+	hint.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+	hint.BackgroundTransparency = 0.25
+	hint.BorderSizePixel = 0
+	hint.Text = "G — выход в лобби"
+	hint.TextColor3 = Color3.fromRGB(220, 220, 220)
+	hint.Font = Enum.Font.Gotham
+	hint.TextSize = 13
+	hint.Parent = gui
+	local hintCorner = Instance.new("UICorner")
+	hintCorner.CornerRadius = UDim.new(0, 6)
+	hintCorner.Parent = hint
+	task.delay(5, function()
+		if gui ~= nil then
+			gui:Destroy()
+		end
+	end)
+end
+
+if game.PlaceId == LOBBY_PLACE_ID then
+	runLobby()
+else
+	runOther()
+end
