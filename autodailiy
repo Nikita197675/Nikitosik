@@ -1,0 +1,376 @@
+-- autodaily.lua — авто-сбор ежедневных наград по профилям (лобби).
+-- Дейли забирается касанием невидимого парта workspace..dailyRewardTouchPart
+-- (Anchored, Transparency=1, Touched обрабатывает сервер). Касание симулируем
+-- через firetouchinterest (не двигая персонажа); фолбэк — телепорт HRP на парт
+-- и обратно. Профили = слоты персонажа (remotes.getCharacterSlots -> payload
+-- {slots={ {slot, unlocked, created, selected, ...} }}). Auto Daily: забрать на
+-- текущем, затем по каждому unlocked+created слоту -> selectCharacterSlot ->
+-- ждать респавн -> забрать; остаёмся на последнем профиле.
+-- GUI: своя лёгкая (Claim Daily / Auto Daily / Unload).
+
+if _G.__AUTODAILY_ACTIVE then
+	return
+end
+_G.__AUTODAILY_ACTIVE = true
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local LocalPlayer = Players.LocalPlayer
+
+local DAILY_PART_NAME = "dailyRewardTouchPart"
+local RESPAWN_TIMEOUT = 15
+local RESPAWN_BUFFER = 1.2
+local BETWEEN_SLOTS = 1
+
+local conns = {}
+local function track(conn)
+	table.insert(conns, conn)
+	return conn
+end
+
+-- Вызов RemoteFunction с таймаутом (getCharacterSlots/selectCharacterSlot могут
+-- зависнуть, если у сервера нет обработчика). Возвращает первое значение ответа.
+local function invokeWithTimeout(remote, timeout, ...)
+	local args = { ... }
+	local done, result = false, nil
+	task.spawn(function()
+		local ok, res = pcall(function()
+			return remote:InvokeServer(table.unpack(args))
+		end)
+		done = true
+		if ok then
+			result = res
+		end
+	end)
+	local t0 = os.clock()
+	while not done and os.clock() - t0 < timeout do
+		task.wait(0.05)
+	end
+	return result
+end
+
+local function getRemote(name)
+	local remotes = ReplicatedStorage:FindFirstChild("remotes")
+	if remotes == nil then
+		return nil
+	end
+	return remotes:FindFirstChild(name)
+end
+
+-- Невидимый парт дейли (ищем по имени в workspace).
+local function findDailyPart()
+	return workspace:FindFirstChild(DAILY_PART_NAME, true)
+end
+
+local function getHRP()
+	local character = LocalPlayer.Character
+	if character == nil then
+		return nil
+	end
+	return character:FindFirstChild("HumanoidRootPart")
+end
+
+-- Симуляция касания в обоих порядках (какой из парт'ов держит TouchInterest —
+-- не важно, лишний вызов безвреден).
+local function fireTouch(part, hrp, toggle)
+	pcall(function()
+		firetouchinterest(part, hrp, toggle)
+	end)
+	pcall(function()
+		firetouchinterest(hrp, part, toggle)
+	end)
+end
+
+-- Забрать дейли на ТЕКУЩЕМ профиле: коснуться парта. Возвращает (ok, текст).
+local function claimDaily()
+	local part = findDailyPart()
+	if part == nil then
+		return false, "парт дейли не найден"
+	end
+	local hrp = getHRP()
+	if hrp == nil then
+		return false, "нет персонажа"
+	end
+	if firetouchinterest ~= nil then
+		fireTouch(part, hrp, 0)
+		task.wait(0.15)
+		fireTouch(part, hrp, 1)
+		return true, "касание отправлено"
+	end
+	-- Фолбэк: телепорт HRP на парт (держим ~0.6с чтобы сервер поймал Touched) и назад.
+	local ok = pcall(function()
+		local save = hrp.CFrame
+		for _ = 1, 6 do
+			hrp.CFrame = part.CFrame
+			task.wait(0.1)
+		end
+		task.wait(0.2)
+		hrp.CFrame = save
+	end)
+	if ok then
+		return true, "касание (телепорт)"
+	end
+	return false, "ошибка касания"
+end
+
+-- Список слотов с персонажем (unlocked+created) + индекс текущего.
+local function getProfiles()
+	local r = getRemote("getCharacterSlots")
+	if r == nil or not r:IsA("RemoteFunction") then
+		return nil, nil
+	end
+	local payload = invokeWithTimeout(r, 6)
+	if type(payload) ~= "table" or type(payload.slots) ~= "table" then
+		return nil, nil
+	end
+	local list = {}
+	local current = nil
+	for _, s in pairs(payload.slots) do
+		if type(s) == "table" and s.slot ~= nil then
+			if s.selected then
+				current = s.slot
+			end
+			if s.unlocked and s.created then
+				table.insert(list, s.slot)
+			end
+		end
+	end
+	table.sort(list)
+	return list, current
+end
+
+-- Переключиться на слот (полный респавн делает сервер). true при успехе.
+local function selectSlot(slot)
+	local r = getRemote("selectCharacterSlot")
+	if r == nil or not r:IsA("RemoteFunction") then
+		return false
+	end
+	local res = invokeWithTimeout(r, 10, slot)
+	return res == true
+end
+
+-- Ждём новый персонаж после смены слота (+ буфер на прогруз лобби).
+local function waitForRespawn(oldChar, timeout)
+	local t0 = os.clock()
+	while os.clock() - t0 < timeout do
+		task.wait(0.1)
+		local c = LocalPlayer.Character
+		if c ~= nil and c ~= oldChar then
+			local hrp = c:FindFirstChild("HumanoidRootPart")
+			local hum = c:FindFirstChildOfClass("Humanoid")
+			if hrp ~= nil and hum ~= nil and hum.Health > 0 then
+				task.wait(RESPAWN_BUFFER)
+				return true
+			end
+		end
+	end
+	return false
+end
+
+-- == GUI ==
+local gui = Instance.new("ScreenGui")
+gui.Name = "AutoDailyGui"
+gui.ResetOnSpawn = false
+gui.DisplayOrder = 200
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local main = Instance.new("Frame")
+main.Size = UDim2.fromOffset(260, 188)
+main.Position = UDim2.fromScale(0.5, 0.4)
+main.AnchorPoint = Vector2.new(0.5, 0.5)
+main.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+main.BorderSizePixel = 0
+main.Parent = gui
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 8)
+mainCorner.Parent = main
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, 0, 0, 28)
+title.BackgroundColor3 = Color3.fromRGB(32, 32, 38)
+title.BorderSizePixel = 0
+title.Text = "Auto Daily"
+title.TextColor3 = Color3.fromRGB(235, 235, 235)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 14
+title.Parent = main
+local titleCorner = Instance.new("UICorner")
+titleCorner.CornerRadius = UDim.new(0, 8)
+titleCorner.Parent = title
+
+local claimBtn = Instance.new("TextButton")
+claimBtn.Size = UDim2.new(1, -20, 0, 32)
+claimBtn.Position = UDim2.fromOffset(10, 36)
+claimBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+claimBtn.BorderSizePixel = 0
+claimBtn.Text = "Claim Daily"
+claimBtn.TextColor3 = Color3.fromRGB(235, 235, 235)
+claimBtn.Font = Enum.Font.GothamBold
+claimBtn.TextSize = 14
+claimBtn.AutoButtonColor = true
+claimBtn.Parent = main
+local claimCorner = Instance.new("UICorner")
+claimCorner.CornerRadius = UDim.new(0, 6)
+claimCorner.Parent = claimBtn
+
+local autoBtn = Instance.new("TextButton")
+autoBtn.Size = UDim2.new(1, -20, 0, 32)
+autoBtn.Position = UDim2.fromOffset(10, 74)
+autoBtn.BackgroundColor3 = Color3.fromRGB(45, 80, 55)
+autoBtn.BorderSizePixel = 0
+autoBtn.Text = "Auto Daily (все профили)"
+autoBtn.TextColor3 = Color3.fromRGB(235, 235, 235)
+autoBtn.Font = Enum.Font.GothamBold
+autoBtn.TextSize = 14
+autoBtn.AutoButtonColor = true
+autoBtn.Parent = main
+local autoCorner = Instance.new("UICorner")
+autoCorner.CornerRadius = UDim.new(0, 6)
+autoCorner.Parent = autoBtn
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -20, 0, 30)
+status.Position = UDim2.fromOffset(10, 114)
+status.BackgroundTransparency = 1
+status.Text = "готов"
+status.TextColor3 = Color3.fromRGB(170, 190, 210)
+status.Font = Enum.Font.Code
+status.TextSize = 12
+status.TextWrapped = true
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.TextYAlignment = Enum.TextYAlignment.Top
+status.Parent = main
+
+local unloadBtn = Instance.new("TextButton")
+unloadBtn.Size = UDim2.new(1, -20, 0, 26)
+unloadBtn.Position = UDim2.fromOffset(10, 154)
+unloadBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
+unloadBtn.BorderSizePixel = 0
+unloadBtn.Text = "Unload"
+unloadBtn.TextColor3 = Color3.fromRGB(220, 180, 180)
+unloadBtn.Font = Enum.Font.Gotham
+unloadBtn.TextSize = 13
+unloadBtn.Parent = main
+local unloadCorner = Instance.new("UICorner")
+unloadCorner.CornerRadius = UDim.new(0, 6)
+unloadCorner.Parent = unloadBtn
+
+local function setStatus(text)
+	pcall(function()
+		status.Text = tostring(text)
+	end)
+end
+
+-- Перетаскивание за заголовок.
+do
+	local dragging = false
+	local dragStart, startPos
+	track(title.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = main.Position
+		end
+	end))
+	track(UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			main.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + delta.X,
+				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+			)
+		end
+	end))
+	track(UserInputService.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+			or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end))
+end
+
+local busy = false
+
+track(claimBtn.MouseButton1Click:Connect(function()
+	if busy then
+		return
+	end
+	local ok, msg = claimDaily()
+	setStatus(msg)
+end))
+
+-- Auto Daily: забрать на текущем, затем обойти остальные профили с персонажем.
+track(autoBtn.MouseButton1Click:Connect(function()
+	if busy then
+		return
+	end
+	busy = true
+	autoBtn.Text = "Auto Daily (идёт...)"
+	task.spawn(function()
+		local ok = pcall(function()
+			-- 1) текущий профиль
+			local _, cmsg = claimDaily()
+			setStatus("текущий: " .. tostring(cmsg))
+			task.wait(BETWEEN_SLOTS)
+
+			-- 2) список профилей
+			local list, current = getProfiles()
+			if list == nil then
+				setStatus("нет списка профилей — забрал только текущий")
+				return
+			end
+			setStatus(("профилей с персонажем: %d"):format(#list))
+			task.wait(0.5)
+
+			-- 3) обход остальных
+			for _, slot in ipairs(list) do
+				if not _G.__AUTODAILY_ACTIVE then
+					return
+				end
+				if slot ~= current then
+					setStatus(("слот %d: переключаюсь..."):format(slot))
+					local oldChar = LocalPlayer.Character
+					if selectSlot(slot) then
+						if waitForRespawn(oldChar, RESPAWN_TIMEOUT) then
+							local _, dmsg = claimDaily()
+							setStatus(("слот %d: %s"):format(slot, tostring(dmsg)))
+						else
+							setStatus(("слот %d: не дождался респавна"):format(slot))
+						end
+					else
+						setStatus(("слот %d: не удалось переключить"):format(slot))
+					end
+					task.wait(BETWEEN_SLOTS)
+				end
+			end
+			setStatus("готово — остаюсь на последнем профиле")
+		end)
+		if not ok then
+			setStatus("ошибка обхода")
+		end
+		busy = false
+		autoBtn.Text = "Auto Daily (все профили)"
+	end)
+end))
+
+local function unload()
+	_G.__AUTODAILY_ACTIVE = false
+	for _, c in ipairs(conns) do
+		pcall(function()
+			c:Disconnect()
+		end)
+	end
+	if gui ~= nil then
+		gui:Destroy()
+	end
+end
+track(unloadBtn.MouseButton1Click:Connect(unload))
+
+if findDailyPart() == nil then
+	setStatus("парт дейли не найден (ты в лобби?)")
+end
