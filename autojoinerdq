@@ -22,6 +22,7 @@ local REMOTE_URL = "https://raw.githubusercontent.com/Nikita197675/Nikitosik/ref
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer
 
@@ -74,6 +75,45 @@ local conns = {}
 local function track(conn)
 	table.insert(conns, conn)
 	return conn
+end
+
+-- == Сохранение настроек (ник + состояние авто-джойна) ==
+-- Файл AutoJoiner/config.json в папке executor'а: ник и вкл/выкл авто-джойна
+-- переживают перезапуск/телепорт и подгружаются сами при старте.
+local CONFIG_PATH = "AutoJoiner/config.json"
+
+local function saveConfig(data)
+	if writefile == nil then
+		return
+	end
+	pcall(function()
+		if makefolder ~= nil then
+			makefolder("AutoJoiner")
+		end
+	end)
+	pcall(function()
+		writefile(CONFIG_PATH, HttpService:JSONEncode(data))
+	end)
+end
+
+local function loadConfig()
+	if isfile == nil or readfile == nil then
+		return {}
+	end
+	local exists = false
+	pcall(function()
+		exists = isfile(CONFIG_PATH)
+	end)
+	if not exists then
+		return {}
+	end
+	local ok, result = pcall(function()
+		return HttpService:JSONDecode(readfile(CONFIG_PATH))
+	end)
+	if ok and type(result) == "table" then
+		return result
+	end
+	return {}
 end
 
 -- Прямой вызов ремоута (фолбэк, если кнопку/сигнал нажать нельзя).
@@ -180,7 +220,9 @@ end
 
 -- == Ветка ЛОББИ: GUI + авто-джойн ==
 local function runLobby()
-	local state = { enabled = false }
+	local saved = loadConfig()
+	local state = { enabled = saved.enabled == true }
+	local savedTarget = type(saved.target) == "string" and saved.target or ""
 
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "AutoJoinerGui"
@@ -190,7 +232,7 @@ local function runLobby()
 	gui.Parent = guiParent()
 
 	local main = Instance.new("Frame")
-	main.Size = UDim2.fromOffset(260, 176)
+	main.Size = UDim2.fromOffset(260, 212)
 	main.Position = UDim2.fromScale(0.5, 0.4)
 	main.AnchorPoint = Vector2.new(0.5, 0.5)
 	main.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
@@ -215,11 +257,11 @@ local function runLobby()
 
 	local box = Instance.new("TextBox")
 	box.Size = UDim2.new(1, -20, 0, 30)
-	box.Position = UDim2.fromOffset(10, 38)
+	box.Position = UDim2.fromOffset(10, 36)
 	box.BackgroundColor3 = Color3.fromRGB(38, 38, 44)
 	box.BorderSizePixel = 0
 	box.PlaceholderText = "Ник игрока"
-	box.Text = ""
+	box.Text = savedTarget
 	box.ClearTextOnFocus = false
 	box.TextColor3 = Color3.fromRGB(235, 235, 235)
 	box.PlaceholderColor3 = Color3.fromRGB(140, 140, 150)
@@ -232,7 +274,7 @@ local function runLobby()
 
 	local toggle = Instance.new("TextButton")
 	toggle.Size = UDim2.new(1, -20, 0, 30)
-	toggle.Position = UDim2.fromOffset(10, 76)
+	toggle.Position = UDim2.fromOffset(10, 72)
 	toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
 	toggle.BorderSizePixel = 0
 	toggle.Text = "Auto-Join: OFF"
@@ -245,9 +287,24 @@ local function runLobby()
 	toggleCorner.CornerRadius = UDim.new(0, 6)
 	toggleCorner.Parent = toggle
 
+	local joinOnceBtn = Instance.new("TextButton")
+	joinOnceBtn.Size = UDim2.new(1, -20, 0, 30)
+	joinOnceBtn.Position = UDim2.fromOffset(10, 108)
+	joinOnceBtn.BackgroundColor3 = Color3.fromRGB(50, 60, 80)
+	joinOnceBtn.BorderSizePixel = 0
+	joinOnceBtn.Text = "Join Once"
+	joinOnceBtn.TextColor3 = Color3.fromRGB(235, 235, 235)
+	joinOnceBtn.Font = Enum.Font.GothamBold
+	joinOnceBtn.TextSize = 14
+	joinOnceBtn.AutoButtonColor = true
+	joinOnceBtn.Parent = main
+	local joinOnceCorner = Instance.new("UICorner")
+	joinOnceCorner.CornerRadius = UDim.new(0, 6)
+	joinOnceCorner.Parent = joinOnceBtn
+
 	local status = Instance.new("TextLabel")
 	status.Size = UDim2.new(1, -20, 0, 26)
-	status.Position = UDim2.fromOffset(10, 112)
+	status.Position = UDim2.fromOffset(10, 146)
 	status.BackgroundTransparency = 1
 	status.Text = "готов"
 	status.TextColor3 = Color3.fromRGB(170, 190, 210)
@@ -259,7 +316,7 @@ local function runLobby()
 
 	local unloadBtn = Instance.new("TextButton")
 	unloadBtn.Size = UDim2.new(1, -20, 0, 26)
-	unloadBtn.Position = UDim2.fromOffset(10, 142)
+	unloadBtn.Position = UDim2.fromOffset(10, 178)
 	unloadBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 52)
 	unloadBtn.BorderSizePixel = 0
 	unloadBtn.Text = "Unload"
@@ -275,6 +332,50 @@ local function runLobby()
 		pcall(function()
 			status.Text = tostring(text)
 		end)
+	end
+
+	-- Текущий ник из поля (обрезанные пробелы).
+	local function currentTarget()
+		return box.Text:gsub("^%s+", ""):gsub("%s+$", "")
+	end
+
+	-- Сохранить ник + состояние авто-джойна в конфиг.
+	local function persist()
+		saveConfig({ target = currentTarget(), enabled = state.enabled })
+	end
+
+	-- Одна попытка джойна к нику из поля (общая для Join Once и цикла).
+	local function joinOnce()
+		local target = currentTarget()
+		if target == "" then
+			setStatus("введи ник")
+			return
+		end
+		if inLobbyOrGame(LocalPlayer) then
+			setStatus("уже в лобби/пати")
+			return
+		end
+		local via = tryJoin(target)
+		if via ~= nil then
+			setStatus(("запрос -> %s (%s)"):format(target, via))
+		else
+			setStatus("не найдено: UI/remote")
+		end
+	end
+
+	-- Применить сохранённое состояние тумблера к виду кнопки.
+	local function refreshToggle()
+		if state.enabled then
+			toggle.Text = "Auto-Join: ON"
+			toggle.BackgroundColor3 = Color3.fromRGB(45, 80, 55)
+		else
+			toggle.Text = "Auto-Join: OFF"
+			toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
+		end
+	end
+	refreshToggle()
+	if savedTarget ~= "" then
+		setStatus("загружено: " .. savedTarget)
 	end
 
 	-- Перетаскивание за заголовок.
@@ -307,17 +408,21 @@ local function runLobby()
 		end))
 	end
 
+	-- Ник сохраняется, как только поле теряет фокус (ввёл один раз — запомнилось).
+	track(box.FocusLost:Connect(function()
+		persist()
+	end))
+
 	track(toggle.MouseButton1Click:Connect(function()
 		state.enabled = not state.enabled
-		if state.enabled then
-			toggle.Text = "Auto-Join: ON"
-			toggle.BackgroundColor3 = Color3.fromRGB(45, 80, 55)
-			setStatus("поиск...")
-		else
-			toggle.Text = "Auto-Join: OFF"
-			toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
-			setStatus("остановлено")
-		end
+		refreshToggle()
+		setStatus(state.enabled and "поиск..." or "остановлено")
+		persist()
+	end))
+
+	track(joinOnceBtn.MouseButton1Click:Connect(function()
+		persist()
+		joinOnce()
 	end))
 
 	local function unload()
@@ -340,21 +445,7 @@ local function runLobby()
 		while _G.__AUTOJOINER_ACTIVE do
 			task.wait(RETRY)
 			if state.enabled then
-				pcall(function()
-					local target = box.Text:gsub("^%s+", ""):gsub("%s+$", "")
-					if target == "" then
-						setStatus("введи ник")
-					elseif inLobbyOrGame(LocalPlayer) then
-						setStatus("уже в лобби/пати")
-					else
-						local via = tryJoin(target)
-						if via ~= nil then
-							setStatus(("запрос -> %s (%s)"):format(target, via))
-						else
-							setStatus("не найдено: UI/remote")
-						end
-					end
-				end)
+				pcall(joinOnce)
 			end
 		end
 	end)
