@@ -6,10 +6,16 @@
 -- экипированные Tool'ы с выбранным именем — дубль имени в обоих слотах = все
 -- Tool'ы этого имени жгутся одновременно (два Geyser в Northern Lands).
 -- Движение: ТОЛЬКО Humanoid:MoveTo (штатный путь, реплицируется как обычная ходьба).
--- Спид-буст: держит WalkSpeed = cfg.speedBoostValue (слайдер 18–20, по 1),
--- как abilities-ускорители. Двойная защита: ворчер на
--- изменение свойства (мгновенно, если сбросили ниже 20) + периодический тик
--- раз 0.5с (speedBoostTick) — игра сбрасывает скорость в самых разных местах.
+-- Режим бега (вкладка Auto Level): ускоряющий скилл вместо спид-буста — бот
+-- поочерёдно жмёт abilityEvent Tool'ов (Pulse Waves, слоты q/e) со встроенным
+-- таймингом 2.9с; оба держатся вне кд (кд 4с) → персонаж бежит без остановки.
+-- Реестр RUN_MODES; новые режимы бега добавляются по образцу.
+-- Авто-лвл-апер (вкладка Auto Level): вписываешь ники прокачиваемых аккаунтов
+-- и сам запускаешь данж; в данже бот подхватывает роут по workspace.dungeonName,
+-- читает уровни ников (leaderstats.Level), сохраняет в DungeonBot/levels.json и,
+-- как только мин. уровень перерастает текущий данж (level > maxLvl из
+-- LEVEL_DUNGEONS, диапазоны 70–130), выходит в лобби (ReturnToLobbyEvent).
+-- Заход в следующий данж — отдельный скрипт (позже).
 -- Автостарт: бот включён сразу при загрузке; настройки (данж, мастер, тумблеры,
 -- слайдеры, стоп-дистанция/каст, способности в слотах) хранятся в
 -- DungeonBot/config.json (вкладка Config: сохранить/загрузить/сброс, автосейв
@@ -56,9 +62,12 @@
 -- загрузки конфига. Конфиг применяется ПЕРВЫМ делом при каждом старте.
 
 -- Запрещённые place/game id: в этих играх скрипт не запускается вообще.
-local BLOCKED_GAME_IDS = {
-	[77649408247578] = true,
-}
+local BLOCKED_GAME_IDS = {}
+
+-- Лобби (place/game id): здесь НЕТ данжа — работает только авто-лвл-апер
+-- (чтение уровней + создание данжа на некст уровень). Боевая логика/маршрут
+-- и режим бега в лобби отключены, чтобы персонаж не бегал по лобби.
+local LOBBY_GAME_ID = 77649408247578
 
 if BLOCKED_GAME_IDS[game.GameId] or BLOCKED_GAME_IDS[game.PlaceId] then
 	return
@@ -133,7 +142,6 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local LocalPlayer = Players.LocalPlayer
 
-local SPEED_NORMAL = 16
 local ENEMY_SIGS = {
 	"aggroRange", "damage", "enemyNameplate", "attackSpeed",
 	"meleeDistance", "moveSpeed", "enemyStyle",
@@ -257,12 +265,223 @@ local DUNGEONS = {
 			Vector3.new(781, 17, 36),
 		},
 	},
+	-- Авто-лвл данжи 70–130 (роуты из routes.txt). Чистые маршруты без
+	-- спавн-маркеров и босс-гейтов; порядок точек = порядок следования.
+	["King's Castle"] = {
+		route = {
+			Vector3.new(-147, 5, 766),
+			Vector3.new(-113, 5, 674),
+			Vector3.new(-22, 6, 575),
+			Vector3.new(-14, 6, 468),
+			Vector3.new(-13, 5, 378),
+			Vector3.new(-12, 5, 246),
+			Vector3.new(-13, 5, 130),
+			Vector3.new(-11, 5, -2),
+			Vector3.new(-12, 6, -140),
+			Vector3.new(5, 5, -177),
+			Vector3.new(-44, 5, -176),
+			Vector3.new(-131, 6, -178),
+			Vector3.new(-129, 6, -233),
+			Vector3.new(-146, 6, -327),
+			Vector3.new(-128, 6, -232),
+			Vector3.new(-127, 6, -174),
+			Vector3.new(-66, 5, -174),
+			Vector3.new(14, 5, -172),
+			Vector3.new(28, 6, -241),
+			Vector3.new(29, 5, -364),
+			Vector3.new(-1, 5, -429),
+			Vector3.new(33, 7, -477),
+			Vector3.new(34, 7, -617),
+			Vector3.new(-38, 7, -617),
+			Vector3.new(-121, 7, -617),
+			Vector3.new(-235, 7, -617),
+			Vector3.new(-255, -1, -616),
+			Vector3.new(-280, -8, -616),
+			Vector3.new(-406, -8, -617),
+			Vector3.new(-449, -5, -618),
+			Vector3.new(-468, -1, -618),
+		},
+	},
+	["The Underworld"] = {
+		route = {
+			Vector3.new(482, 88, 455),
+			Vector3.new(482, 70, 414),
+			Vector3.new(480, 68, 276),
+			Vector3.new(480, 68, 179),
+			Vector3.new(479, 68, 100),
+			Vector3.new(479, 68, 43),
+			Vector3.new(486, 68, -20),
+			Vector3.new(428, 68, -58),
+			Vector3.new(469, 68, -118),
+			Vector3.new(579, 68, -63),
+			Vector3.new(637, 68, -68),
+			Vector3.new(692, 68, -72),
+			Vector3.new(768, 67, -79),
+			Vector3.new(844, 68, -85),
+			Vector3.new(1007, 68, -102),
+			Vector3.new(1123, 67, -114),
+			Vector3.new(1197, 67, -122),
+			Vector3.new(1300, 68, -132),
+			Vector3.new(1350, 68, -104),
+			Vector3.new(1401, 68, -154),
+			Vector3.new(1449, 68, -110),
+			Vector3.new(1501, 67, -147),
+			Vector3.new(1572, 67, -154),
+			Vector3.new(1650, 67, -162),
+			Vector3.new(1732, 64, -166),
+			Vector3.new(1816, 61, -168),
+			Vector3.new(1928, 61, -171),
+			Vector3.new(2034, 60, -174),
+			Vector3.new(2146, 60, -171),
+			Vector3.new(2219, 60, -211),
+			Vector3.new(2251, 60, -157),
+			Vector3.new(2389, 60, -176),
+			Vector3.new(2622, 60, -192),
+			Vector3.new(2694, 60, -226),
+		},
+	},
+	["Samurai Palace"] = {
+		route = {
+			Vector3.new(-90, 5, -122),
+			Vector3.new(-41, 5, -76),
+			Vector3.new(-9, 5, 16),
+			Vector3.new(55, 5, -16),
+			Vector3.new(33, 5, 12),
+			Vector3.new(33, 17, 67),
+			Vector3.new(82, 17, 112),
+			Vector3.new(-26, 17, 122),
+			Vector3.new(27, 17, 128),
+			Vector3.new(28, 17, 171),
+			Vector3.new(71, 17, 230),
+			Vector3.new(-11, 17, 241),
+			Vector3.new(-38, 17, 269),
+			Vector3.new(-3, 17, 275),
+			Vector3.new(11, 17, 298),
+			Vector3.new(32, 29, 297),
+			Vector3.new(52, 49, 297),
+			Vector3.new(75, 72, 296),
+			Vector3.new(78, 73, 269),
+			Vector3.new(31, 73, 168),
+			Vector3.new(-49, 73, 236),
+			Vector3.new(-121, 70, 236),
+			Vector3.new(-193, 70, 235),
+			Vector3.new(-283, 69, 306),
+			Vector3.new(-301, 70, 373),
+			Vector3.new(-232, 70, 406),
+			Vector3.new(-306, 70, 466),
+			Vector3.new(-237, 70, 506),
+			Vector3.new(-142, 69, 566),
+			Vector3.new(8, 67, 597),
+			Vector3.new(100, 69, 601),
+			Vector3.new(188, 69, 618),
+			Vector3.new(187, 70, 678),
+			Vector3.new(177, 69, 739),
+			Vector3.new(130, 69, 918),
+			Vector3.new(25, 69, 976),
+			Vector3.new(-79, 72, 991),
+			Vector3.new(-224, 71, 1009),
+		},
+	},
+	["The Canals"] = {
+		route = {
+			Vector3.new(-208, 15, 85),
+			Vector3.new(-234, 23, 86),
+			Vector3.new(-263, 23, 28),
+			Vector3.new(-274, 23, -45),
+			Vector3.new(-245, 30, -79),
+			Vector3.new(-211, 15, -107),
+			Vector3.new(-145, 15, -197),
+			Vector3.new(-102, 15, -93),
+			Vector3.new(-97, 15, -41),
+			Vector3.new(-95, 15, 14),
+			Vector3.new(-5, 15, 8),
+			Vector3.new(120, 15, 4),
+			Vector3.new(137, 15, -33),
+			Vector3.new(137, 39, -101),
+			Vector3.new(194, 39, -128),
+			Vector3.new(307, 39, -112),
+			Vector3.new(310, 48, -61),
+			Vector3.new(311, 38, -23),
+			Vector3.new(348, 38, 15),
+			Vector3.new(282, 36, 19),
+			Vector3.new(240, 15, 19),
+			Vector3.new(173, 15, 84),
+			Vector3.new(162, 15, 140),
+			Vector3.new(146, 16, 88),
+			Vector3.new(100, 15, 88),
+			Vector3.new(81, 15, 136),
+			Vector3.new(60, 15, 86),
+			Vector3.new(-8, 15, 87),
+			Vector3.new(-57, 15, 88),
+			Vector3.new(-94, 15, 89),
+			Vector3.new(-100, 15, 128),
+			Vector3.new(-99, 23, 198),
+			Vector3.new(-62, 23, 219),
+			Vector3.new(-5, 23, 219),
+			Vector3.new(-119, 23, 224),
+			Vector3.new(-126, 17, 216),
+			Vector3.new(-138, 15, 216),
+			Vector3.new(-143, 15, 224),
+			Vector3.new(-142, 15, 254),
+			Vector3.new(-183, 15, 269),
+			Vector3.new(-257, 15, 268),
+			Vector3.new(-402, 15, 278),
+		},
+	},
+	["Steampunk Sewers"] = {
+		route = {
+			Vector3.new(43, 4, -46),
+			Vector3.new(43, 4, -101),
+			Vector3.new(43, -4, -126),
+			Vector3.new(19, -4, -197),
+			Vector3.new(110, -4, -171),
+			Vector3.new(193, -4, -149),
+			Vector3.new(170, -4, -199),
+			Vector3.new(176, -4, -325),
+			Vector3.new(175, -5, -386),
+			Vector3.new(171, -4, -452),
+			Vector3.new(228, -5, -429),
+			Vector3.new(255, 4, -428),
+			Vector3.new(270, 0, -428),
+			Vector3.new(309, 0, -428),
+			Vector3.new(347, 0, -427),
+			Vector3.new(418, 0, -429),
+			Vector3.new(511, 0, -430),
+			Vector3.new(580, -13, -429),
+			Vector3.new(668, -30, -429),
+			Vector3.new(844, -30, -431),
+			Vector3.new(921, -30, -390),
+			Vector3.new(929, -9, -428),
+			Vector3.new(923, 8, -456),
+			Vector3.new(976, 9, -432),
+			Vector3.new(1030, 19, -430),
+			Vector3.new(1092, 18, -430),
+			Vector3.new(1124, 9, -429),
+			Vector3.new(1210, 9, -430),
+			Vector3.new(1308, -5, -430),
+			Vector3.new(1383, -23, -431),
+			Vector3.new(1423, -25, -431),
+			Vector3.new(1454, -36, -431),
+			Vector3.new(1518, -36, -431),
+		},
+	},
+}
+
+-- Авто-лвл: диапазоны уровней данжей (из routes.txt). Порядок = прогрессия.
+-- Бот читает уровни заданных ников в данже; как только мин. уровень
+-- перерастает текущий данж (level > maxLvl) — выходит в лобби
+-- (ReturnToLobbyEvent). Заход в следующий данж — отдельный скрипт (позже).
+local LEVEL_DUNGEONS = {
+	{ name = "King's Castle",    minLvl = 70,  maxLvl = 79 },
+	{ name = "The Underworld",   minLvl = 80,  maxLvl = 89 },
+	{ name = "Samurai Palace",   minLvl = 90,  maxLvl = 99 },
+	{ name = "The Canals",       minLvl = 100, maxLvl = 109 },
+	{ name = "Ghastly Harbor",   minLvl = 110, maxLvl = 119 },
+	{ name = "Steampunk Sewers", minLvl = 120, maxLvl = 129 },
 }
 
 local cfg = {
 	enabled = false,
-	speedBoost = true,
-	speedBoostValue = 18,
 	stopDist = 45,
 	repathInterval = 0.75,
 	retargetInterval = 1.0,
@@ -292,6 +511,14 @@ local cfg = {
 	transferThreshold = 280,
 	highlight = true,
 	showLog = false,
+	-- Авто-лвл (отдельная вкладка): ники прокачиваемых аккаунтов, тумблер,
+	-- режим бега (ускоряющий скилл вместо спид-буста).
+	autoLevelEnabled = false,
+	autoLevelNicks = "",
+	runMode = "Выкл",
+	-- Авто-создание данжа в лобби на некст уровень + хардкор всегда вкл.
+	autoCreate = true,
+	autoHardcore = true,
 }
 
 -- Список способностей для выбора в слотах (GUI: Способность 1 / Способность 2).
@@ -320,6 +547,31 @@ local function isValidSkillName(name)
 		end
 	end
 	return false
+end
+
+-- == Режимы бега (вкладка Auto Level) ==
+-- Ускоряющие скиллы вместо спид-буста: бот поочерёдно жмёт abilityEvent
+-- нужного Tool'а с ВСТРОЕННЫМ таймингом (у каждого режима свой interval).
+-- Pulse Waves: два Tool'а (слоты q/e), кд 4с у каждого; чередование каждые
+-- 2.9с держит оба вне кд → бесконечный бег. Фаерятся ТОЛЬКО этим режимом
+-- (в боевой fireSkills не попадают — их нет в SKILL_NAMES).
+-- Новые режимы бега добавляются по этому образцу (свой toolName + interval).
+local RUN_MODES = {
+	{ name = "Выкл" },
+	{ name = "Pulse Waves", toolName = "Pulse Waves", interval = 2.9 },
+}
+
+local function runModeByName(name)
+	for _, mode in ipairs(RUN_MODES) do
+		if mode.name == name then
+			return mode
+		end
+	end
+	return nil
+end
+
+local function isValidRunMode(name)
+	return runModeByName(name) ~= nil
 end
 
 local bot = {
@@ -516,10 +768,11 @@ local function applyConfigData(data)
 		or cfg.transferThreshold < 10 or cfg.transferThreshold > 300 then
 		cfg.transferThreshold = 280
 	end
-	-- Спид-буст: диапазон 18–20.
-	if type(cfg.speedBoostValue) ~= "number"
-		or cfg.speedBoostValue < 18 or cfg.speedBoostValue > 20 then
-		cfg.speedBoostValue = 18
+	-- Режим бега: валидация сохранённого значения по реестру RUN_MODES.
+	if not isValidRunMode(cfg.runMode) then
+		cfg.runMode = "Выкл"
+	else
+		log("config: runMode -> " .. cfg.runMode)
 	end
 	return applied
 end
@@ -896,19 +1149,11 @@ local function setEnabled(value)
 		log("bot ON")
 		resetPathState()
 		bot.target = nil
-		local hrp, humanoid = getCharParts()
-		if hrp ~= nil and humanoid ~= nil and cfg.speedBoost then
-			humanoid.WalkSpeed = cfg.speedBoostValue
-		end
 	else
 		log("bot OFF")
 		stopMovement()
 		bot.target = nil
 		bot.waitUntil = nil
-		local _, humanoid = getCharParts()
-		if humanoid ~= nil then
-			humanoid.WalkSpeed = SPEED_NORMAL
-		end
 	end
 	applyHighlight()
 end
@@ -1296,19 +1541,9 @@ local function updateInfo(now)
 	for _ in pairs(bot.enemies) do
 		count += 1
 	end
-	-- Индикация фактической скорости: пока бот+буст включены, ожидаем
-	-- cfg.speedBoostValue; если игра сбросила — «spd16!» (с восклицанием)
-	-- до восстановления тиком.
-	local speedText = cfg.speedBoost and ("spd%d"):format(cfg.speedBoostValue) or "spd16"
-	if cfg.enabled and cfg.speedBoost then
-		local _, hum = getCharParts()
-		if hum ~= nil and hum.Health > 0 then
-			speedText = ("spd%d%s"):format(
-				math.floor(hum.WalkSpeed + 0.5),
-				hum.WalkSpeed ~= cfg.speedBoostValue and "!" or ""
-			)
-		end
-	end
+	-- Индикация режима бега (вместо спид-буста): off / имя режима.
+	local runText = (cfg.runMode ~= nil and cfg.runMode ~= "Выкл")
+		and ("run:%s"):format(cfg.runMode) or "run:off"
 	local duoText = ""
 	if cfg.duoRole == "p1" then
 		duoText = " | duo: p1"
@@ -1320,7 +1555,7 @@ local function updateInfo(now)
 	end
 	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d%s"):format(
 		cfg.enabled and bot.state or "off",
-		speedText,
+		runText,
 		targetText,
 		distText,
 		count,
@@ -1353,9 +1588,20 @@ local function inDungeonNow()
 	return dn ~= nil and dn:IsA("StringValue")
 end
 
+-- Лобби-место (по id): боевая логика/маршрут/режим бега тут не работают.
+local function inLobbyPlace()
+	return game.GameId == LOBBY_GAME_ID or game.PlaceId == LOBBY_GAME_ID
+end
+
 RunService.Heartbeat:Connect(function(deltaTime)
 	local now = os.clock()
 	if not cfg.enabled then
+		updateInfo(now)
+		return
+	end
+	-- В лобби боевой/маршрутный движок отключён (нет данжа): работает только
+	-- авто-лвл-апер (свой 0.1с-цикл). Персонаж не бегает по лобби.
+	if inLobbyPlace() then
 		updateInfo(now)
 		return
 	end
@@ -1923,21 +2169,413 @@ local function autoReplayTick()
 	end
 end
 
--- Проверка спид-буста: игра сбрасывает WalkSpeed при смене состояний, входе
--- в данж, кастах и т.д. — ворчер на событие ловит не всё (и пишет с задержкой).
--- Здесь — периодическая проверка: пока бот и тумблер включены, WalkSpeed
--- обязан быть cfg.speedBoostValue; иначе — мгновенно возвращаем.
-local function speedBoostTick()
-	if not cfg.enabled or not cfg.speedBoost then
+-- == Авто-лвл-апер (вкладка Auto Level) ==
+-- Поток: игрок вписывает ники прокачиваемых аккаунтов и сам запускает данж.
+-- Бот в данже читает уровни этих ников (leaderstats.Level), сохраняет их в
+-- DungeonBot/levels.json (для будущего отдельного скрипта переключения данжей),
+-- авто-подхватывает нужный роут по workspace.dungeonName и, как только мин.
+-- уровень перерастает текущий данж (level > maxLvl из LEVEL_DUNGEONS), выходит
+-- в лобби (ReturnToLobbyEvent). Заход в следующий данж — отдельный скрипт.
+
+local autoLevelState = {
+	levels = {},        -- nick -> level (последнее прочитанное)
+	exitFired = false,  -- защита от спама ReturnToLobbyEvent
+	lastSaveAt = 0,
+	lastLogAt = 0,
+	createCooldownAt = 0,   -- троттлинг попыток создания данжа в лобби
+	createdForLevel = nil,  -- имя данжа, который уже создали в этом лобби
+}
+
+-- Парсинг строки ников (через запятую/пробел/перенос) в массив.
+local function parseNicks(str)
+	local list = {}
+	if type(str) ~= "string" then
+		return list
+	end
+	for nick in string.gmatch(str, "[^,%s]+") do
+		table.insert(list, nick)
+	end
+	return list
+end
+
+-- Уровень игрока по нику: leaderstats.Level (NumberValue/IntValue). nil если нет.
+local function readPlayerLevel(nick)
+	local player = Players:FindFirstChild(nick)
+	if player == nil then
+		return nil
+	end
+	local ls = player:FindFirstChild("leaderstats")
+	if ls == nil then
+		return nil
+	end
+	local lvl = ls:FindFirstChild("Level")
+	if lvl ~= nil and lvl:IsA("ValueBase") and type(lvl.Value) == "number" then
+		return lvl.Value
+	end
+	return nil
+end
+
+-- Сохранение прочитанных уровней в DungeonBot/levels.json (персональный файл).
+local function saveLevels()
+	if writefile == nil then
 		return
 	end
-	local _, humanoid = getCharParts()
-	if humanoid ~= nil and humanoid.Health > 0 and humanoid.WalkSpeed ~= cfg.speedBoostValue then
-		local before = math.floor(humanoid.WalkSpeed + 0.5)
-		humanoid.WalkSpeed = cfg.speedBoostValue
-		log(("speed check: restored %d -> %d"):format(before, cfg.speedBoostValue))
+	pcall(function()
+		makefolder("DungeonBot")
+	end)
+	pcall(function()
+		local path = "DungeonBot/levels.json"
+		writefile(path, game:GetService("HttpService"):JSONEncode(autoLevelState.levels))
+	end)
+end
+
+-- Запись в лобби: ремоут ReturnToLobbyEvent (из дампа — так жмёт кнопку игры).
+local function fireReturnToLobby()
+	local remotesFolder = ReplicatedStorage:FindFirstChild("remotes")
+	local remote = remotesFolder and remotesFolder:FindFirstChild("ReturnToLobbyEvent")
+	if not (remote and remote:IsA("RemoteEvent")) then
+		return false, "ReturnToLobbyEvent not found"
+	end
+	local ok, err = pcall(function()
+		remote:FireServer()
+	end)
+	return ok, err
+end
+
+-- Диапазон уровней для данжа из LEVEL_DUNGEONS (по имени из dungeonDropdown).
+local function levelDungeonInfo(name)
+	for _, entry in ipairs(LEVEL_DUNGEONS) do
+		if entry.name == name then
+			return entry
+		end
+	end
+	return nil
+end
+
+-- Данж по уровню (диапазон содержит level). nil если вне 70–129.
+local function pickDungeonForLevel(level)
+	for _, entry in ipairs(LEVEL_DUNGEONS) do
+		if level >= entry.minLvl and level <= entry.maxLvl then
+			return entry
+		end
+	end
+	return nil
+end
+
+-- Сложность по уровню: первая половина бэнда (X0–X4) = Insane, вторая
+-- (X5–X9) = Nightmare. Хардкор при создании включается всегда (отдельно).
+local function pickDifficultyForLevel(level)
+	return (level % 10) < 5 and "Insane" or "Nightmare"
+end
+
+-- == Создание данжа в лобби (firesignal по UI queueGui) ==
+-- Тайлы данжа/сложности/хардкора — ImageLabel (не кнопки): клик игра ловит
+-- через InputBegan. Поэтому firesignal по MouseButton1Click/Activated (для
+-- TextButton вроде createGame и кнопок dropdown) + перебор getconnections
+-- InputBegan с синтетическим InputObject (для ImageLabel-тайлов).
+local function fireGuiClick(obj)
+	if obj == nil then
+		return false
+	end
+	local fired = false
+	if firesignal ~= nil then
+		for _, sigName in ipairs({ "MouseButton1Click", "Activated" }) do
+			local ok, sig = pcall(function()
+				return obj[sigName]
+			end)
+			if ok and sig ~= nil then
+				pcall(function()
+					firesignal(sig)
+					fired = true
+				end)
+			end
+		end
+	end
+	if getconnections ~= nil then
+		local fakeInput = {
+			UserInputType = Enum.UserInputType.MouseButton1,
+			UserInputState = Enum.UserInputState.Begin,
+		}
+		for _, sigName in ipairs({ "InputBegan", "MouseButton1Down", "MouseButton1Up" }) do
+			local ok, sig = pcall(function()
+				return obj[sigName]
+			end)
+			if ok and sig ~= nil then
+				local ok2, conns = pcall(getconnections, sig)
+				if ok2 and type(conns) == "table" then
+					for _, conn in ipairs(conns) do
+						pcall(function()
+							conn:Fire(fakeInput)
+						end)
+						fired = true
+					end
+				end
+			end
+		end
+	end
+	return fired
+end
+
+local function getQueueGui()
+	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg == nil then
+		return nil
+	end
+	return pg:FindFirstChild("queueGui")
+end
+
+-- Создание данжа: выбрать данж в dungeonDropdown -> сложность -> хардкор ВКЛ
+-- -> createGame. Возвращает true, если дошли до клика по createGame.
+local function createDungeon(name, difficulty, hardcore)
+	local queueGui = getQueueGui()
+	if queueGui == nil then
+		return false, "queueGui not found"
+	end
+	-- 1) Данж через dropdown: открыть, найти опцию по label.Text, клик button.
+	local dropdown = queueGui:FindFirstChild("dungeonDropdown", true)
+	if dropdown ~= nil then
+		local ddButton = dropdown:FindFirstChild("button")
+		if ddButton ~= nil then
+			fireGuiClick(ddButton)
+		end
+		local options = dropdown:FindFirstChild("options", true)
+		if options ~= nil then
+			for _, opt in ipairs(options:GetChildren()) do
+				if opt.Name ~= "optionTemplate" and not opt:IsA("UIListLayout") then
+					local label = opt:FindFirstChild("label", true)
+					local btn = opt:FindFirstChild("button", true)
+						or (opt:IsA("GuiButton") and opt or nil)
+					if label ~= nil and label:IsA("TextLabel")
+						and label.Text == name and btn ~= nil then
+						fireGuiClick(btn)
+						break
+					end
+				end
+			end
+		end
+	end
+	task.wait(0.1)
+	-- 2) Сложность: тайл Insane/Nightmare в difficultyPanel.
+	local diffPanel = queueGui:FindFirstChild("difficultyPanel", true)
+	if diffPanel ~= nil and difficulty ~= nil then
+		local tile = diffPanel:FindFirstChild(difficulty)
+		if tile ~= nil then
+			fireGuiClick(tile)
+		end
+	end
+	task.wait(0.1)
+	-- 3) Хардкор ВКЛ (всегда при создании в лобби).
+	if hardcore then
+		local hcSection = queueGui:FindFirstChild("hardcoreSection", true)
+		local hc = (hcSection ~= nil and (hcSection:FindFirstChild("hardcore", true) or hcSection))
+			or queueGui:FindFirstChild("hardcore", true)
+		if hc ~= nil then
+			fireGuiClick(hc)
+		end
+	end
+	task.wait(0.1)
+	-- 4) Create Dungeon.
+	local createBtn = queueGui:FindFirstChild("createGame", true)
+	if createBtn == nil then
+		return false, "createGame not found"
+	end
+	fireGuiClick(createBtn)
+	return true
+end
+
+-- Сохранение «следующей цели» для отдельного скрипта захода (join).
+local function saveNextTarget(target)
+	if writefile == nil then
+		return
+	end
+	pcall(function()
+		makefolder("DungeonBot")
+	end)
+	pcall(function()
+		writefile("DungeonBot/next_target.json",
+			game:GetService("HttpService"):JSONEncode(target))
+	end)
+end
+
+-- Мин. уровень прокачиваемых ников (онлайн), с записью в autoLevelState.levels.
+local function readTrackedMinLevel()
+	local nicks = parseNicks(cfg.autoLevelNicks)
+	if #nicks == 0 then
+		return nil
+	end
+	local minLevel = nil
+	for _, nick in ipairs(nicks) do
+		local lvl = readPlayerLevel(nick)
+		if lvl ~= nil then
+			autoLevelState.levels[nick] = lvl
+			if minLevel == nil or lvl < minLevel then
+				minLevel = lvl
+			end
+		end
+	end
+	return minLevel
+end
+
+-- Быстрый тик авто-лвла (0.1с): ловим лвл-апы прокачиваемых аккаунтов до того,
+-- как они выйдут. В данже — чтение уровней + выход в лобби при перерастании.
+-- В лобби — создание данжа на некст уровень (+ хардкор всегда).
+local function autoLevelTick()
+	if not cfg.autoLevelEnabled then
+		autoLevelState.exitFired = false
+		autoLevelState.createdForLevel = nil
+		return
+	end
+	local now = os.clock()
+
+	-- Непрерывное сохранение уровней на диск (троттлинг 1с), чтобы отдельный
+	-- скрипт видел актуальные значения; в память пишем на каждом тике.
+	local minLevel = readTrackedMinLevel()
+	if now - autoLevelState.lastSaveAt > 1 then
+		autoLevelState.lastSaveAt = now
+		saveLevels()
+	end
+
+	-- ЛОББИ: создаём данж на некст уровень.
+	if not inDungeonNow() then
+		autoLevelState.exitFired = false
+		if not cfg.autoCreate or minLevel == nil then
+			return
+		end
+		local entry = pickDungeonForLevel(minLevel)
+		if entry == nil then
+			if now - autoLevelState.lastLogAt > 15 then
+				autoLevelState.lastLogAt = now
+				log(("auto-level: lvl %d вне диапазона 70–129 — создание пропущено"):format(minLevel))
+			end
+			return
+		end
+		if autoLevelState.createdForLevel == entry.name then
+			return
+		end
+		if now - autoLevelState.createCooldownAt < 8 then
+			return
+		end
+		autoLevelState.createCooldownAt = now
+		local diff = pickDifficultyForLevel(minLevel)
+		saveNextTarget({
+			dungeon = entry.name,
+			difficulty = diff,
+			hardcore = cfg.autoHardcore,
+			level = minLevel,
+		})
+		log(("auto-level: lobby -> create %s / %s / hardcore=%s (lvl %d)"):format(
+			entry.name, diff, tostring(cfg.autoHardcore), minLevel))
+		task.spawn(function()
+			local ok, err = createDungeon(entry.name, diff, cfg.autoHardcore)
+			if ok then
+				autoLevelState.createdForLevel = entry.name
+				log("auto-level: createDungeon fired")
+			else
+				log("auto-level: createDungeon failed: " .. tostring(err))
+			end
+		end)
+		return
+	end
+
+	-- В ДАНЖЕ: сброс лобби-защиты + авто-подхват роута.
+	autoLevelState.createdForLevel = nil
+	local dnValue = nil
+	local dn = workspace:FindFirstChild("dungeonName")
+	if dn ~= nil and dn:IsA("StringValue") then
+		dnValue = dn.Value
+	end
+	if dnValue ~= nil and DUNGEONS[dnValue] ~= nil and bot.currentDungeon ~= dnValue then
+		bot.currentDungeon = dnValue
+		resetRoute()
+		log("auto-level: route -> " .. dnValue)
+	end
+
+	if minLevel == nil then
+		if now - autoLevelState.lastLogAt > 10 then
+			autoLevelState.lastLogAt = now
+			log("auto-level: tracked nicks not found online yet")
+		end
+		return
+	end
+
+	-- Выход в лобби: мин. уровень перерос текущий данж (level > maxLvl).
+	local info = dnValue ~= nil and levelDungeonInfo(dnValue) or nil
+	if info ~= nil and minLevel > info.maxLvl and not autoLevelState.exitFired then
+		autoLevelState.exitFired = true
+		saveLevels()
+		local ok, err = fireReturnToLobby()
+		if ok then
+			log(("auto-level: lvl %d > %s (max %d) -> return to lobby"):format(
+				minLevel, dnValue, info.maxLvl))
+		else
+			log("auto-level: return to lobby failed: " .. tostring(err))
+			autoLevelState.exitFired = false
+		end
 	end
 end
+
+-- Быстрый опрос уровней (0.1с): успеть поймать лвл-ап до выхода аккаунта.
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		local ok, err = pcall(autoLevelTick)
+		if not ok then
+			log("auto-level tick error: " .. tostring(err))
+			task.wait(0.5)
+		end
+	end
+end)
+
+-- == Режим бега: поочерёдный каст ускоряющего скилла (встроенный тайминг) ==
+-- Pulse Waves: два Tool'а (слоты q/e); бот жмёт их по очереди каждые
+-- mode.interval (2.9с) — оба держатся вне кд, персонаж бежит бесконечно.
+-- Работает всегда (и в бою, и в беге), пока бот включён и жив.
+local function getRunModeTools(toolName)
+	local list = {}
+	local character = LocalPlayer.Character
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	for _, container in ipairs({ backpack, character }) do
+		if container ~= nil then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") and tool.Name == toolName then
+					local ev = tool:FindFirstChild("abilityEvent")
+					if ev ~= nil and ev:IsA("RemoteEvent") then
+						table.insert(list, ev)
+					end
+				end
+			end
+		end
+	end
+	return list
+end
+
+local runSlotIndex = 0
+task.spawn(function()
+	while true do
+		local mode = runModeByName(cfg.runMode)
+		if mode == nil or mode.toolName == nil or not cfg.enabled or inLobbyPlace() then
+			runSlotIndex = 0
+			task.wait(0.3)
+		else
+			local _, humanoid = getCharParts()
+			if humanoid == nil or humanoid.Health <= 0 then
+				task.wait(0.3)
+			else
+				local tools = getRunModeTools(mode.toolName)
+				if #tools == 0 then
+					task.wait(0.3)
+				else
+					runSlotIndex = runSlotIndex % #tools + 1
+					local ev = tools[runSlotIndex]
+					pcall(function()
+						ev:FireServer()
+					end)
+					task.wait(mode.interval or 2.9)
+				end
+			end
+		end
+	end
+end)
 
 task.spawn(function()
 	while true do
@@ -1945,7 +2583,6 @@ task.spawn(function()
 		validateEnemies()
 		positionStuckTick()
 		computeTimeoutTick()
-		speedBoostTick()
 		autoStartTick()
 		autoReplayTick()
 	end
@@ -2287,26 +2924,6 @@ local function setupCharacter(character)
 		resetPathState()
 		log("died")
 	end)
-	if cfg.speedBoost and cfg.enabled then
-		humanoid.WalkSpeed = cfg.speedBoostValue
-	end
-	humanoid:GetPropertyChangedSignal("WalkSpeed"):Connect(function()
-		if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
-			and humanoid.Health > 0 and humanoid.WalkSpeed ~= cfg.speedBoostValue then
-			-- Мгновенный возврат: скорость выше буста (рывок способности) не
-			-- трогаем — только меньше. Периодический тик докроет остальное.
-			if humanoid.WalkSpeed < cfg.speedBoostValue then
-				humanoid.WalkSpeed = cfg.speedBoostValue
-			else
-				task.delay(rand(0.1, 0.3), function()
-					if cfg.speedBoost and cfg.enabled and humanoid.Parent ~= nil
-						and humanoid.WalkSpeed ~= cfg.speedBoostValue then
-						humanoid.WalkSpeed = cfg.speedBoostValue
-					end
-				end)
-			end
-		end
-	end)
 	bot.state = "IDLE"
 	log("character ready")
 	if cfg.enabled and not bot.started then
@@ -2439,6 +3056,7 @@ task.spawn(function()
 	local debugTab = window:CreateTab("Debug", 4483362458)
 	local dungeonTab = window:CreateTab("Dungeon", 4483362458)
 	local autoTab = window:CreateTab("Auto", 4483362458)
+	local autoLevelTab = window:CreateTab("Auto Level", 4483362458)
 	local duoTab = window:CreateTab("Duo", 4483362458)
 	local configTab = window:CreateTab("Config", 4483362458)
 
@@ -2514,39 +3132,6 @@ task.spawn(function()
 		Flag = "dbot_master",
 		Callback = function(value)
 			setEnabled(value)
-			scheduleSave()
-		end,
-	})
-
-	mainTab:CreateToggle({
-		Name = "Спид-буст",
-		CurrentValue = cfg.speedBoost,
-		Flag = "dbot_speed",
-		Callback = function(value)
-			cfg.speedBoost = value
-			local _, humanoid = getCharParts()
-			if humanoid ~= nil then
-				humanoid.WalkSpeed = value and cfg.speedBoostValue or SPEED_NORMAL
-			end
-			log("speed boost: " .. tostring(value))
-			scheduleSave()
-		end,
-	})
-
-	mainTab:CreateSlider({
-		Name = "Спид-буст (18–20)",
-		Range = { 18, 20 },
-		Increment = 1,
-		Suffix = " spd",
-		CurrentValue = cfg.speedBoostValue,
-		Flag = "dbot_speedvalue",
-		Callback = function(value)
-			cfg.speedBoostValue = value
-			local _, humanoid = getCharParts()
-			if humanoid ~= nil and cfg.speedBoost then
-				humanoid.WalkSpeed = value
-			end
-			log(("speed boost value: %d"):format(value))
 			scheduleSave()
 		end,
 	})
@@ -2827,6 +3412,119 @@ task.spawn(function()
 		autoTab:CreateParagraph({
 			Title = "Как работает авто-цикл",
 			Content = "Старт: в данже бот сам жмёт changeStartValue (без аргументов). Реплей: после убийства босса бот ЖДЁТ появления дропа (rewardGuiHolder), даёт время на подбор и шлёт replayDungeon с данными данжа. Если дроп не появился за лимит ожидания — реплей всё равно.",
+		})
+	end)
+
+	local runModeOptions = {}
+	for _, mode in ipairs(RUN_MODES) do
+		table.insert(runModeOptions, mode.name)
+	end
+
+	autoLevelTab:CreateToggle({
+		Name = "Авто-лвл-апер",
+		CurrentValue = cfg.autoLevelEnabled,
+		Flag = "dbot_autolevel",
+		Callback = function(value)
+			cfg.autoLevelEnabled = value
+			autoLevelState.exitFired = false
+			log("auto level: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateInput({
+		Name = "Ники прокачиваемых (через запятую)",
+		CurrentValue = cfg.autoLevelNicks,
+		PlaceholderText = "nick1, nick2, nick3",
+		ClearOnFocus = false,
+		Flag = "dbot_autolevelnicks",
+		Callback = function(text)
+			cfg.autoLevelNicks = tostring(text)
+			autoLevelState.levels = {}
+			log("auto level nicks: " .. tostring(text))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateDropdown({
+		Name = "Режим бега (ускоряющий скилл)",
+		Options = runModeOptions,
+		CurrentValue = isValidRunMode(cfg.runMode) and cfg.runMode or "Выкл",
+		Flag = "dbot_runmode",
+		Callback = function(option)
+			local name = option
+			if typeof(option) == "table" then
+				name = option[1] or option.CurrentValue
+			end
+			if isValidRunMode(name) then
+				cfg.runMode = name
+			else
+				cfg.runMode = "Выкл"
+			end
+			runSlotIndex = 0
+			log("run mode: " .. tostring(cfg.runMode))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateButton({
+		Name = "Выйти в лобби сейчас (тест)",
+		Callback = function()
+			local ok, err = fireReturnToLobby()
+			log(ok and "auto level: return to lobby fired" or ("auto level: lobby failed: " .. tostring(err)))
+		end,
+	})
+
+	autoLevelTab:CreateToggle({
+		Name = "Авто-создание данжа в лобби (на некст уровень)",
+		CurrentValue = cfg.autoCreate,
+		Flag = "dbot_autocreate",
+		Callback = function(value)
+			cfg.autoCreate = value
+			autoLevelState.createdForLevel = nil
+			log("auto create: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateToggle({
+		Name = "Хардкор всегда вкл (при создании)",
+		CurrentValue = cfg.autoHardcore,
+		Flag = "dbot_autohardcore",
+		Callback = function(value)
+			cfg.autoHardcore = value
+			log("auto hardcore: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateButton({
+		Name = "Создать данж по текущему уровню (тест)",
+		Callback = function()
+			local minLevel = readTrackedMinLevel()
+			if minLevel == nil then
+				log("auto level: ники не найдены онлайн")
+				return
+			end
+			local entry = pickDungeonForLevel(minLevel)
+			if entry == nil then
+				log(("auto level: lvl %d вне диапазона 70–129"):format(minLevel))
+				return
+			end
+			local diff = pickDifficultyForLevel(minLevel)
+			log(("auto level: тест-создание %s / %s / hardcore=%s (lvl %d)"):format(
+				entry.name, diff, tostring(cfg.autoHardcore), minLevel))
+			task.spawn(function()
+				local ok, err = createDungeon(entry.name, diff, cfg.autoHardcore)
+				log(ok and "auto level: createDungeon fired" or ("auto level: create failed: " .. tostring(err)))
+			end)
+		end,
+	})
+
+	pcall(function()
+		autoLevelTab:CreateParagraph({
+			Title = "Авто-лвл-апер",
+			Content = "Вписываешь ники прокачиваемых аккаунтов и сам запускаешь данж. В данже бот подхватывает роут по названию данжа, читает уровни этих ников (leaderstats.Level, опрос 0.1с чтобы успеть поймать лвл-ап до выхода) и сохраняет их в DungeonBot/levels.json. Как только минимальный уровень перерастает текущий данж (level > макс. уровня диапазона) — бот выходит в лобби (ReturnToLobbyEvent) и создаёт данж на некст уровень: данж по диапазону, сложность Insane (X0–X4) / Nightmare (X5–X9), хардкор всегда вкл. Цель пишется в DungeonBot/next_target.json для отдельного скрипта захода. Режим бега: ускоряющий скилл вместо спид-буста — Pulse Waves жмутся по очереди каждые 2.9с, персонаж бежит без остановки.",
 		})
 	end)
 
