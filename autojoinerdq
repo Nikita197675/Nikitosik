@@ -7,7 +7,9 @@
 -- контроллер игры сам зовёт remotes.sendJoinRequest:InvokeServer(ник, false).
 -- Фолбэк (нет firesignal/getconnections или кнопки): прямой InvokeServer.
 -- Не-лобби (данж и пр.): клавиша G -> выход в лобби через remotes.teleToLobby
--- (фолбэк leaveGame), оба FireServer без аргументов.
+-- (фолбэк leaveGame), оба FireServer без аргументов. Плюс АВТО-ЛИВ: если
+-- целевого игрока (ник из конфига) НЕТ в данже дольше ABSENCE_LIMIT (после
+-- стартового JOIN_GRACE на прогрузку) — автоматически выходим в лобби.
 -- Авто-лоад после телепорта: queue_on_teleport тянет скрипт по REMOTE_URL,
 -- один и тот же скрипт ветвится по PlaceId.
 
@@ -451,7 +453,13 @@ local function runLobby()
 	end)
 end
 
--- == Ветка НЕ-ЛОББИ: клавиша G -> выход в лобби ==
+-- == Ветка НЕ-ЛОББИ: клавиша G -> выход в лобби + авто-выход, если цель не тут ==
+-- Авто-лив: берём сохранённый ник (target из конфига). Если игрока с этим ником
+-- НЕТ в данже (нет в Players) дольше ABSENCE_LIMIT — автоматически выходим в
+-- лобби (teleToLobby). JOIN_GRACE в начале — на прогрузку/подтягивание цели.
+local JOIN_GRACE = 15
+local ABSENCE_LIMIT = 6
+
 local function runOther()
 	local function leaveToLobby()
 		local remotes = ReplicatedStorage:FindFirstChild("remotes")
@@ -485,6 +493,36 @@ local function runOther()
 		end
 	end))
 
+	-- Авто-выход в лобби, если целевой игрок (ник из конфига) не в данже.
+	local saved = loadConfig()
+	local target = ""
+	if type(saved.target) == "string" then
+		target = saved.target:gsub("^%s+", ""):gsub("%s+$", "")
+	end
+	if target ~= "" then
+		task.spawn(function()
+			local startAt = os.clock()
+			local absentSince = nil
+			local left = false
+			while _G.__AUTOJOINER_ACTIVE and not left do
+				task.wait(2)
+				if os.clock() - startAt >= JOIN_GRACE then
+					local present = Players:FindFirstChild(target) ~= nil
+					if present then
+						absentSince = nil
+					else
+						if absentSince == nil then
+							absentSince = os.clock()
+						elseif os.clock() - absentSince > ABSENCE_LIMIT then
+							left = true
+							leaveToLobby()
+						end
+					end
+				end
+			end
+		end)
+	end
+
 	-- Короткий тост-хинт.
 	local gui = Instance.new("ScreenGui")
 	gui.Name = "AutoJoinerHint"
@@ -492,15 +530,17 @@ local function runOther()
 	gui.DisplayOrder = 200
 	gui.Parent = guiParent()
 	local hint = Instance.new("TextLabel")
-	hint.Size = UDim2.fromOffset(180, 26)
-	hint.Position = UDim2.new(0.5, -90, 0, 8)
+	hint.Size = UDim2.fromOffset(240, 26)
+	hint.Position = UDim2.new(0.5, -120, 0, 8)
 	hint.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
 	hint.BackgroundTransparency = 0.25
 	hint.BorderSizePixel = 0
-	hint.Text = "G — выход в лобби"
+	hint.Text = (target ~= "" and ("G — выход | авто-лив если нет: " .. target))
+		or "G — выход в лобби"
 	hint.TextColor3 = Color3.fromRGB(220, 220, 220)
 	hint.Font = Enum.Font.Gotham
 	hint.TextSize = 13
+	hint.TextTruncate = Enum.TextTruncate.AtEnd
 	hint.Parent = gui
 	local hintCorner = Instance.new("UICorner")
 	hintCorner.CornerRadius = UDim.new(0, 6)
