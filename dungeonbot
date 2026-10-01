@@ -2520,6 +2520,46 @@ local function readTrackedMinLevel()
 	return minLevel
 end
 
+-- Мин. уровень из СОХРАНЁННЫХ значений (autoLevelState.levels = levels.json +
+-- живые чтения). Нужно в лобби: аккаунты могут быть ещё не в этом сервере, но
+-- их последний уровень известен из файла, сохранённого при выходе из данжа.
+local function minSavedLevel(nicks)
+	local m = nil
+	for _, nick in ipairs(nicks) do
+		local lvl = autoLevelState.levels[nick]
+		if type(lvl) == "number" then
+			if m == nil or lvl < m then
+				m = lvl
+			end
+		end
+	end
+	return m
+end
+
+-- Загрузка сохранённых уровней из DungeonBot/levels.json в память (при старте
+-- скрипта, в т.ч. после телепорта в лобби).
+local function loadLevels()
+	if isfile == nil or readfile == nil then
+		return
+	end
+	if not isfile("DungeonBot/levels.json") then
+		return
+	end
+	local ok, data = pcall(function()
+		return game:GetService("HttpService"):JSONDecode(readfile("DungeonBot/levels.json"))
+	end)
+	if ok and type(data) == "table" then
+		local n = 0
+		for nick, lvl in pairs(data) do
+			if type(lvl) == "number" then
+				autoLevelState.levels[nick] = lvl
+				n += 1
+			end
+		end
+		log(("auto-level: loaded %d saved levels"):format(n))
+	end
+end
+
 -- Быстрый тик авто-лвла (0.1с): ловим лвл-апы прокачиваемых аккаунтов до того,
 -- как они выйдут. В данже — чтение уровней + выход в лобби при перерастании.
 -- В лобби — создание данжа на некст уровень (+ хардкор всегда).
@@ -2539,17 +2579,29 @@ local function autoLevelTick()
 		saveLevels()
 	end
 
-	-- ЛОББИ: создаём данж на некст уровень.
+	-- ЛОББИ: создаём данж на некст уровень по СОХРАНЁННЫМ уровням. Прокачиваемые
+	-- аккаунты могут быть ещё НЕ в лобби-сервере (телепортятся отдельно) — их
+	-- live-leaderstats недоступны, поэтому берём уровни из levels.json (сохранены
+	-- при выходе из данжа). Если кто-то из них всё же в лобби — обновим live.
 	if not inDungeonNow() then
 		autoLevelState.exitFired = false
-		if not cfg.autoCreate or minLevel == nil then
+		if not cfg.autoCreate then
 			return
 		end
-		local entry = pickDungeonForLevel(minLevel)
+		local nicks = parseNicks(cfg.autoLevelNicks)
+		local decisionLevel = minSavedLevel(nicks)
+		if decisionLevel == nil then
+			if now - autoLevelState.lastLogAt > 15 then
+				autoLevelState.lastLogAt = now
+				log("auto-level: lobby — нет сохранённых уровней (levels.json пуст)")
+			end
+			return
+		end
+		local entry = pickDungeonForLevel(decisionLevel)
 		if entry == nil then
 			if now - autoLevelState.lastLogAt > 15 then
 				autoLevelState.lastLogAt = now
-				log(("auto-level: lvl %d вне диапазона 70–129 — создание пропущено"):format(minLevel))
+				log(("auto-level: lvl %d вне диапазона 70–129 — создание пропущено"):format(decisionLevel))
 			end
 			return
 		end
@@ -2560,15 +2612,15 @@ local function autoLevelTick()
 			return
 		end
 		autoLevelState.createCooldownAt = now
-		local diff = pickDifficultyForLevel(minLevel)
+		local diff = pickDifficultyForLevel(decisionLevel)
 		saveNextTarget({
 			dungeon = entry.name,
 			difficulty = diff,
 			hardcore = cfg.autoHardcore,
-			level = minLevel,
+			level = decisionLevel,
 		})
 		log(("auto-level: lobby -> create %s / %s / hardcore=%s (lvl %d)"):format(
-			entry.name, diff, tostring(cfg.autoHardcore), minLevel))
+			entry.name, diff, tostring(cfg.autoHardcore), decisionLevel))
 		task.spawn(function()
 			local ok, err = createDungeon(entry.name, diff, cfg.autoHardcore)
 			if ok then
@@ -3036,6 +3088,7 @@ end
 pcall(function()
 	local hadFile = isfile ~= nil and isfile(configFilePath())
 	loadConfig()
+	loadLevels()
 	if hadFile and cfg.enabled then
 		log("config: bot was enabled, autostart will resume")
 	end
