@@ -3669,6 +3669,7 @@ task.spawn(function()
 			if value then
 				updatePlayersList()
 			end
+			scheduleSave()
 		end,
 	})
 
