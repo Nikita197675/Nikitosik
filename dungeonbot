@@ -1,14 +1,15 @@
 -- DungeonBot.lua — легитный тестер-бот для данжей.
--- Фаза 1: подбегание к мобам. Фаза 2: скиллы через ремоуты Tool'ов
--- (Backpack["Geyser"].abilityEvent:FireServer() и т.д.). Во вкладке Main
--- выбирается способность для слота 1 и слота 2 (список SKILL_NAMES: Geyser,
--- Chain Lightning, Life Dash, Flame Strike, Frost Cone); жмутся только
--- экипированные Tool'ы с выбранным именем — дубль имени в обоих слотах = все
--- Tool'ы этого имени жгутся одновременно (два Geyser в Northern Lands).
+-- Фаза 1: подбегание к мобам. Фаза 2: скиллы КАК РЕАЛЬНЫЙ ИГРОК — нажатие
+-- слота q/e: tool.localEvent:Fire() (локальная анимация) + remotes.abilityUsed
+-- :FireServer(slot, tool) — тот же путь, что у игры при нажатии клавиши, с
+-- видимой анимацией. Во вкладке Main выбирается способность для слота 1 (Q) и
+-- слота 2 (E) из списка SKILL_NAMES; жмётся слот, если его Tool = выбранному
+-- имени и готов (cooldown <= 0, не busyCasting).
 -- Движение: ТОЛЬКО Humanoid:MoveTo (штатный путь, реплицируется как обычная ходьба).
 -- Режим бега (вкладка Auto Level): ускоряющий скилл вместо спид-буста — бот
--- поочерёдно жмёт abilityEvent Tool'ов (Pulse Waves, слоты q/e) со встроенным
--- таймингом 2.9с; оба держатся вне кд (кд 4с) → персонаж бежит без остановки.
+-- поочерёдно НАЖИМАЕТ слоты q/e (Pulse Waves) как реальный игрок (localEvent +
+-- abilityUsed, с анимацией) со встроенным таймингом 2.9с; оба держатся вне кд
+-- (кд 4с) → персонаж бежит без остановки.
 -- Реестр RUN_MODES; новые режимы бега добавляются по образцу.
 -- Авто-лвл-апер (вкладка Auto Level): вписываешь ники прокачиваемых аккаунтов
 -- и сам запускаешь данж; в данже бот подхватывает роут по workspace.dungeonName,
@@ -37,7 +38,7 @@
 -- tool.cooldown (NumberValue, сервер) и busyCasting на персонаже — готовность
 -- читается из игры, НОЛЬ ТАЙМЕРОВ (реестра кд больше нет: сервер сам отвечает
 -- готовностью); потерянная из-за пинга ремотка повторяется сама.
--- Flame Strike бьёт через abilityEvent, Frost Cone — через spellEvent.
+-- Каст = нажатие слота: localEvent:Fire() + abilityUsed:FireServer(slot, tool).
 -- Аимлок — ТОЛЬКО телом (камеру не трогаем, игра без шифтлока).
 -- DUO-режим (вкладка Duo): плеер 1 при входе в данж держит полный стоп 6с,
 -- затем стартует (changeStartValue); плеер 2 никогда не стартует сам и стоит
@@ -526,10 +527,8 @@ local cfg = {
 
 -- Список способностей для выбора в слотах (GUI: Способность 1 / Способность 2).
 -- Кулдаун НЕ хранится: готовность читается из сигналов игры (cooldown <= 0
--- и не busyCasting), таймеров нет вообще. Жмутся только экипированные Tool'ы
--- с выбранным для слота именем (дубль имени в обоих слотах = все Tool'ы этого
--- имени жгутся одновременно — два Geyser в Northern Lands).
--- Flame Strike использует abilityEvent, Frost Cone — spellEvent.
+-- и не busyCasting), таймеров нет вообще. Жмётся слот q/e, если его Tool =
+-- выбранному имени (как реальное нажатие: localEvent + abilityUsed).
 local SKILL_NAMES = {
 	"Geyser",
 	"Chain Lightning",
@@ -553,11 +552,11 @@ local function isValidSkillName(name)
 end
 
 -- == Режимы бега (вкладка Auto Level) ==
--- Ускоряющие скиллы вместо спид-буста: бот поочерёдно жмёт abilityEvent
--- нужного Tool'а с ВСТРОЕННЫМ таймингом (у каждого режима свой interval).
--- Pulse Waves: два Tool'а (слоты q/e), кд 4с у каждого; чередование каждые
--- 2.9с держит оба вне кд → бесконечный бег. Фаерятся ТОЛЬКО этим режимом
--- (в боевой fireSkills не попадают — их нет в SKILL_NAMES).
+-- Ускоряющие скиллы вместо спид-буста: бот поочерёдно НАЖИМАЕТ слот q/e нужного
+-- скилла (pressAbility: localEvent + abilityUsed, с анимацией) с ВСТРОЕННЫМ
+-- таймингом (у каждого режима свой interval). Pulse Waves: слоты q/e, кд 4с
+-- у каждого; чередование каждые 2.9с держит оба вне кд → бесконечный бег.
+-- Жмутся ТОЛЬКО этим режимом (в боевой fireSkills слот режима пропускается).
 -- Новые режимы бега добавляются по этому образцу (свой toolName + interval).
 local RUN_MODES = {
 	{ name = "Выкл" },
@@ -1227,17 +1226,17 @@ task.spawn(function()
 	end
 end)
 
--- == Скиллы через ремоуты Tool'ов (Backpack/Character) ==
--- Сигнальный режим (из дампов Tool'ов): внутри каждого скилла есть NumberValue
--- cooldown (серверный остаток кд) и cooldownLength (полный кд), а на персонаже
--- busyCasting. Нативный гейт игры: cooldown <= 0 and not busyCasting — читаем
--- готовность прямо из игры, НОЛЬ ТАЙМЕРОВ (фолбэк-реестра кд нет: сервер сам
--- отвечает готовностью). Потерянная из-за пинга ремотка повторится сама
--- (сервер кд не включил -> cooldown остался 0). Стойка = cooldownLength из Tool'а.
--- Flame Strike бьёт через abilityEvent, Frost Cone — через spellEvent.
+-- == Скиллы: нажатие слота q/e КАК РЕАЛЬНЫЙ ИГРОК ==
+-- Из декомпила обработчика нажатий (StarterGui.UIS): клавиша Q/E ->
+--   tool.localEvent:Fire()            -- локальная анимация/эффекты (видно!)
+--   remotes.abilityUsed:FireServer(slot, tool)   -- серверу: нажат слот
+-- Повторяем этот путь (вариант B): анимация проигрывается, сервер получает
+-- тот же remote — не отличить от реального игрока. abilityEvent БОЛЬШЕ НЕ ЖМЁМ.
+-- Готовность — из сигналов игры: tool.cooldown <= 0 и не busyCasting.
 
 local CAST_DEBOUNCE = 0.5
 
+-- Стейт по слоту ("q"/"e"): анти-спам дебаунс.
 local skillState = {}
 
 -- NumberValue-потомок Tool'а (cooldown / cooldownLength). nil-safe.
@@ -1262,13 +1261,65 @@ local function isBusyCasting()
 	return false
 end
 
--- Перечисляем экипированные Tool'ы, выбранные для слотов (skillSlot1/skillSlot2):
--- только по ним жмём ремот. Два слота с одним именем (Geyser+Geyser в Northern
--- Lands) — соберутся ВСЕ Tool'ы этого имени и жгутся одновременно, каждый своим
--- ремоутом. Ремоут — abilityEvent (Flame Strike) либо spellEvent (Frost Cone).
--- Кулдаун-стейт по инстансу ремоута — одноимённые скиллы независимы.
-local function getEquippedAbilities()
-	local list = {}
+-- Ремоут abilityUsed (как в игровом обработчике нажатий).
+local function getAbilityUsedRemote()
+	local remotes = ReplicatedStorage:FindFirstChild("remotes")
+	if remotes == nil then
+		return nil
+	end
+	local r = remotes:FindFirstChild("abilityUsed")
+	if r ~= nil and r:IsA("RemoteEvent") then
+		return r
+	end
+	return nil
+end
+
+-- Tool слота ("q"/"e") в Backpack/Character по abilitySlot.Value.
+local function findSlotTool(slot)
+	local character = LocalPlayer.Character
+	local backpack = LocalPlayer:FindFirstChild("Backpack")
+	for _, container in ipairs({ backpack, character }) do
+		if container ~= nil then
+			for _, tool in ipairs(container:GetChildren()) do
+				if tool:IsA("Tool") then
+					local s = tool:FindFirstChild("abilitySlot")
+					if s ~= nil and s:IsA("StringValue") and s.Value == slot then
+						return tool
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- Нажатие слота как реальный игрок: localEvent:Fire() (анимация) +
+-- abilityUsed:FireServer(slot, tool). Возвращает true, если дёрнули remote.
+local function pressAbility(slot, tool)
+	tool = tool or findSlotTool(slot)
+	if tool == nil then
+		return false
+	end
+	local le = tool:FindFirstChild("localEvent")
+	if le ~= nil and le:IsA("BindableEvent") then
+		pcall(function()
+			le:Fire()
+		end)
+	end
+	local au = getAbilityUsedRemote()
+	if au == nil then
+		return false
+	end
+	local ok = pcall(function()
+		au:FireServer(slot, tool)
+	end)
+	return ok
+end
+
+-- Боевой каст: жмём слоты q/e (как игрок), если их Tool выбран в skillSlot1/2
+-- по имени и готов (cooldown <= 0, не busyCasting). Слот активного режима бега
+-- пропускаем — им управляет режим бега. waitOnSkills -> стойка на cooldownLength.
+local function fireSkills(now, targetName)
 	local wanted = {}
 	if cfg.skillSlot1 ~= nil and cfg.skillSlot1 ~= "none" then
 		wanted[cfg.skillSlot1] = true
@@ -1277,74 +1328,39 @@ local function getEquippedAbilities()
 		wanted[cfg.skillSlot2] = true
 	end
 	if next(wanted) == nil then
-		return list
+		return
 	end
-	local character = LocalPlayer.Character
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	for _, container in ipairs({ backpack, character }) do
-		if container ~= nil then
-			for _, tool in ipairs(container:GetChildren()) do
-				if tool:IsA("Tool") and wanted[tool.Name] then
-					local ev = tool:FindFirstChild("abilityEvent")
-					if ev == nil or not ev:IsA("RemoteEvent") then
-						ev = tool:FindFirstChild("spellEvent")
-					end
-					if ev ~= nil and ev:IsA("RemoteEvent") then
-						table.insert(list, { tool = tool, ev = ev })
-					end
-				end
-			end
-		end
+	local runTool = nil
+	local mode = runModeByName(cfg.runMode)
+	if mode ~= nil then
+		runTool = mode.toolName
 	end
-	return list
-end
-
--- Скиллы: готовность ТОЛЬКО из сигналов игры (cooldown <= 0 and not busyCasting)
--- + анти-спам дебаунс. Никаких таймеров кд. waitOnSkills -> стойка ровно на
--- cooldownLength от момента каста (длительность из игры).
-local function fireSkills(now, targetName)
-	local equipped = getEquippedAbilities()
 	local fired = false
 	local maxReady = 0
-	for _, entry in ipairs(equipped) do
-		local ev = entry.ev
-		local st = skillState[ev]
-		if st == nil then
-			st = {
-				debouncedUntil = 0,
-				logged = false,
-			}
-			skillState[ev] = st
-		end
-		if not st.logged then
-			st.logged = true
-			log(("skill: %s ready by signal"):format(entry.tool.Name))
-		end
-		-- Нативный гейт игры + дебаунс (окно репликации cooldown > 0 при пинге).
-		local canFire = (toolNumber(entry.tool, "cooldown") or 0) <= 0
-			and not isBusyCasting()
-			and now >= st.debouncedUntil
-		if canFire then
-			local ok = pcall(function()
-				ev:FireServer()
-			end)
-			if ok then
-				fired = true
-				-- Только анти-спам окно, НЕ кд: если сервер не принял каст
-				-- (пинг/потеря), cooldown останется 0 и ремотка повторится.
-				st.debouncedUntil = now + CAST_DEBOUNCE
-				-- Длительность стойки = реальный cooldownLength из игры.
-				local cdLen = toolNumber(entry.tool, "cooldownLength")
-				if cdLen ~= nil then
-					maxReady = math.max(maxReady, now + cdLen)
-				end
-				log(("skill: %s -> %s"):format(entry.tool.Name, targetName or (bot.target and bot.target.Name) or "?"))
+	for _, slot in ipairs({ "q", "e" }) do
+		local tool = findSlotTool(slot)
+		if tool ~= nil and wanted[tool.Name] and (runTool == nil or tool.Name ~= runTool) then
+			local st = skillState[slot]
+			if st == nil then
+				st = { debouncedUntil = 0 }
+				skillState[slot] = st
 			end
-		end
-	end
-	for ev in pairs(skillState) do
-		if ev.Parent == nil then
-			skillState[ev] = nil
+			-- Нативный гейт игры + дебаунс (окно репликации cooldown > 0 при пинге).
+			local canFire = (toolNumber(tool, "cooldown") or 0) <= 0
+				and not isBusyCasting()
+				and now >= st.debouncedUntil
+			if canFire then
+				if pressAbility(slot, tool) then
+					fired = true
+					st.debouncedUntil = now + CAST_DEBOUNCE
+					local cdLen = toolNumber(tool, "cooldownLength")
+					if cdLen ~= nil then
+						maxReady = math.max(maxReady, now + cdLen)
+					end
+					log(("skill: %s (slot %s) -> %s"):format(
+						tool.Name, slot, targetName or (bot.target and bot.target.Name) or "?"))
+				end
+			end
 		end
 	end
 	-- Стойка: ровно cooldownLength от момента каста (без таймеров кд).
@@ -2614,27 +2630,20 @@ task.spawn(function()
 	end
 end)
 
--- == Режим бега: поочерёдный каст ускоряющего скилла (встроенный тайминг) ==
--- Pulse Waves: два Tool'а (слоты q/e); бот жмёт их по очереди каждые
--- mode.interval (2.9с) — оба держатся вне кд, персонаж бежит бесконечно.
--- Работает всегда (и в бою, и в беге), пока бот включён и жив.
-local function getRunModeTools(toolName)
-	local list = {}
-	local character = LocalPlayer.Character
-	local backpack = LocalPlayer:FindFirstChild("Backpack")
-	for _, container in ipairs({ backpack, character }) do
-		if container ~= nil then
-			for _, tool in ipairs(container:GetChildren()) do
-				if tool:IsA("Tool") and tool.Name == toolName then
-					local ev = tool:FindFirstChild("abilityEvent")
-					if ev ~= nil and ev:IsA("RemoteEvent") then
-						table.insert(list, ev)
-					end
-				end
-			end
+-- == Режим бега: поочерёдное НАЖАТИЕ слота ускоряющего скилла (как игрок) ==
+-- Pulse Waves: слоты q/e; бот жмёт их по очереди каждые mode.interval (2.9с)
+-- через pressAbility (localEvent:Fire + abilityUsed:FireServer) — С АНИМАЦИЕЙ,
+-- как реальное нажатие клавиши. Работает всегда (бой+бег), пока бот включён
+-- и жив; в лобби отключён.
+local function getRunModeSlots(toolName)
+	local slots = {}
+	for _, slot in ipairs({ "q", "e" }) do
+		local tool = findSlotTool(slot)
+		if tool ~= nil and tool.Name == toolName then
+			table.insert(slots, slot)
 		end
 	end
-	return list
+	return slots
 end
 
 local runSlotIndex = 0
@@ -2649,15 +2658,12 @@ task.spawn(function()
 			if humanoid == nil or humanoid.Health <= 0 then
 				task.wait(0.3)
 			else
-				local tools = getRunModeTools(mode.toolName)
-				if #tools == 0 then
+				local slots = getRunModeSlots(mode.toolName)
+				if #slots == 0 then
 					task.wait(0.3)
 				else
-					runSlotIndex = runSlotIndex % #tools + 1
-					local ev = tools[runSlotIndex]
-					pcall(function()
-						ev:FireServer()
-					end)
+					runSlotIndex = runSlotIndex % #slots + 1
+					pressAbility(slots[runSlotIndex])
 					task.wait(mode.interval or 2.9)
 				end
 			end
