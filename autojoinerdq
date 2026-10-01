@@ -7,9 +7,10 @@
 -- контроллер игры сам зовёт remotes.sendJoinRequest:InvokeServer(ник, false).
 -- Фолбэк (нет firesignal/getconnections или кнопки): прямой InvokeServer.
 -- Не-лобби (данж и пр.): клавиша G -> выход в лобби через remotes.teleToLobby
--- (фолбэк leaveGame), оба FireServer без аргументов. Плюс АВТО-ЛИВ: если
--- целевого игрока (ник из конфига) НЕТ в данже дольше ABSENCE_LIMIT (после
--- стартового JOIN_GRACE на прогрузку) — автоматически выходим в лобби.
+-- (фолбэк leaveGame), оба FireServer без аргументов. Плюс АВТО-ЛИВ (edge-детект):
+-- лив только после того, как лидера (ник из конфига) увидели в данже и он пропал
+-- (реально ушёл); сравнение ника без учёта регистра. Статус-панель вверху
+-- показывает: ждём лидера / лидер в данже / лидер ушёл.
 -- Авто-лоад после телепорта: queue_on_teleport тянет скрипт по REMOTE_URL,
 -- один и тот же скрипт ветвится по PlaceId.
 
@@ -476,12 +477,13 @@ local function runLobby()
 	end)
 end
 
--- == Ветка НЕ-ЛОББИ: клавиша G -> выход в лобби + авто-выход, если цель не тут ==
--- Авто-лив: берём сохранённый ник (target из конфига). Если игрока с этим ником
--- НЕТ в данже (нет в Players) дольше ABSENCE_LIMIT — автоматически выходим в
--- лобби (teleToLobby). JOIN_GRACE в начале — на прогрузку/подтягивание цели.
-local JOIN_GRACE = 15
-local ABSENCE_LIMIT = 6
+-- == Ветка НЕ-ЛОББИ: клавиша G -> выход в лобби + авто-выход, если цель ушла ==
+-- Авто-лив (edge-детект): лив ТОЛЬКО после того, как лидера (target из конфига)
+-- хоть раз увидели в данже и он пропал дольше ABSENCE_LIMIT (лидер реально ушёл).
+-- Если лидер так и не появился за NEVER_SEEN_LIMIT — лив (не тот инстанс).
+-- Сравнение ника — без учёта регистра. JOIN_GRACE больше не нужен (edge-детект).
+local ABSENCE_LIMIT = 10
+local NEVER_SEEN_LIMIT = 60
 
 local function runOther()
 	local function leaveToLobby()
@@ -516,7 +518,34 @@ local function runOther()
 		end
 	end))
 
-	-- Авто-выход в лобби, если целевой игрок (ник из конфига) не в данже.
+	-- Статус-панель (видно, что происходит с авто-ливом).
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "AutoJoinerHint"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 200
+	gui.Parent = guiParent()
+	local hint = Instance.new("TextLabel")
+	hint.Size = UDim2.fromOffset(300, 26)
+	hint.Position = UDim2.new(0.5, -150, 0, 8)
+	hint.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
+	hint.BackgroundTransparency = 0.25
+	hint.BorderSizePixel = 0
+	hint.Text = "G — выход в лобби"
+	hint.TextColor3 = Color3.fromRGB(220, 220, 220)
+	hint.Font = Enum.Font.Gotham
+	hint.TextSize = 13
+	hint.TextTruncate = Enum.TextTruncate.AtEnd
+	hint.Parent = gui
+	local hintCorner = Instance.new("UICorner")
+	hintCorner.CornerRadius = UDim.new(0, 6)
+	hintCorner.Parent = hint
+	track(hint.AncestryChanged:Connect(function() end))
+
+	-- Авто-выход в лобби, если целевой игрок (ник из конфига) ПОКИНУЛ данж.
+	-- Edge-детект: лив разрешён ТОЛЬКО после того, как цель хоть раз увидели в
+	-- данже (лидер был тут и ушёл). Если цель так и не появилась за
+	-- NEVER_SEEN_LIMIT — лив (попали не в тот инстанс). Сравнение ника — без
+	-- учёта регистра (playerPresentByName).
 	local saved = loadConfig()
 	local target = ""
 	if type(saved.target) == "string" then
@@ -526,53 +555,50 @@ local function runOther()
 		task.spawn(function()
 			local startAt = os.clock()
 			local absentSince = nil
+			local seenTarget = false
 			local left = false
 			while _G.__AUTOJOINER_ACTIVE and not left do
-				task.wait(2)
-				if os.clock() - startAt >= JOIN_GRACE then
-					local present = playerPresentByName(target)
-					if present then
-						absentSince = nil
-					else
-						if absentSince == nil then
-							absentSince = os.clock()
-						elseif os.clock() - absentSince > ABSENCE_LIMIT then
-							left = true
-							leaveToLobby()
-						end
+				task.wait(1)
+				local present = playerPresentByName(target)
+				local now = os.clock()
+				if present then
+					seenTarget = true
+					absentSince = nil
+				elseif absentSince == nil then
+					absentSince = now
+				end
+
+				if present then
+					hint.Text = ("%s в данже"):format(target)
+					hint.TextColor3 = Color3.fromRGB(150, 220, 150)
+				elseif seenTarget then
+					local gone = now - absentSince
+					hint.Text = ("%s ушёл %.0fs (лив через %.0fs)"):format(
+						target, gone, math.max(ABSENCE_LIMIT - gone, 0))
+					hint.TextColor3 = Color3.fromRGB(255, 200, 120)
+					if gone > ABSENCE_LIMIT then
+						left = true
+						leaveToLobby()
+					end
+				else
+					local waited = now - startAt
+					hint.Text = ("жду %s %.0fs"):format(target, waited)
+					hint.TextColor3 = Color3.fromRGB(200, 200, 210)
+					-- Ни разу не увидели лидера -> вероятно не тот инстанс.
+					if waited > NEVER_SEEN_LIMIT then
+						left = true
+						leaveToLobby()
 					end
 				end
 			end
 		end)
+	else
+		task.delay(5, function()
+			if gui ~= nil then
+				gui:Destroy()
+			end
+		end)
 	end
-
-	-- Короткий тост-хинт.
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "AutoJoinerHint"
-	gui.ResetOnSpawn = false
-	gui.DisplayOrder = 200
-	gui.Parent = guiParent()
-	local hint = Instance.new("TextLabel")
-	hint.Size = UDim2.fromOffset(240, 26)
-	hint.Position = UDim2.new(0.5, -120, 0, 8)
-	hint.BackgroundColor3 = Color3.fromRGB(24, 24, 28)
-	hint.BackgroundTransparency = 0.25
-	hint.BorderSizePixel = 0
-	hint.Text = (target ~= "" and ("G — выход | авто-лив если нет: " .. target))
-		or "G — выход в лобби"
-	hint.TextColor3 = Color3.fromRGB(220, 220, 220)
-	hint.Font = Enum.Font.Gotham
-	hint.TextSize = 13
-	hint.TextTruncate = Enum.TextTruncate.AtEnd
-	hint.Parent = gui
-	local hintCorner = Instance.new("UICorner")
-	hintCorner.CornerRadius = UDim.new(0, 6)
-	hintCorner.Parent = hint
-	task.delay(5, function()
-		if gui ~= nil then
-			gui:Destroy()
-		end
-	end)
 end
 
 if game.PlaceId == LOBBY_PLACE_ID then
