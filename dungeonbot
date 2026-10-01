@@ -519,6 +519,9 @@ local cfg = {
 	-- Авто-создание данжа в лобби на некст уровень + хардкор всегда вкл.
 	autoCreate = true,
 	autoHardcore = true,
+	-- Ждать всех прокачиваемых (ников) перед стартом+движением в данже.
+	autoWaitPlayers = true,
+	waitPlayersTimeout = 60,
 }
 
 -- Список способностей для выбора в слотах (GUI: Способность 1 / Способность 2).
@@ -615,7 +618,15 @@ local bot = {
 	duoHoldUntil = nil,
 	duoWaitLoggedAt = 0,
 	duoHoldLoggedAt = 0,
+	partyWaitSince = nil,
+	partyPresent = 0,
+	partyTotal = 0,
+	partyLoggedAt = 0,
 }
+
+-- Флаг выгрузки (кнопка Unload в Config): все while-циклы его проверяют и
+-- выходят; Heartbeat-соединение дисконнектится, GUI уничтожается.
+local unloaded = false
 
 -- Состояние синхронизации смерти (Duo): partner — кешированный игрок-партнёр,
 -- wasAlive — edge-детект живой->мёртвый, resetAt — кулдаун после сброса
@@ -773,6 +784,11 @@ local function applyConfigData(data)
 		cfg.runMode = "Выкл"
 	else
 		log("config: runMode -> " .. cfg.runMode)
+	end
+	-- Таймаут ожидания игроков: диапазон 10–180с.
+	if type(cfg.waitPlayersTimeout) ~= "number"
+		or cfg.waitPlayersTimeout < 10 or cfg.waitPlayersTimeout > 180 then
+		cfg.waitPlayersTimeout = 60
 	end
 	return applied
 end
@@ -1205,7 +1221,7 @@ local function retargetTick()
 end
 
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(math.max(cfg.retargetInterval * rand(0.85, 1.15), 0.1))
 		retargetTick()
 	end
@@ -1553,6 +1569,9 @@ local function updateInfo(now)
 	if cfg.duoSaver then
 		duoText = duoText .. " | saver"
 	end
+	if bot.state == "WAIT_PARTY" then
+		duoText = duoText .. (" | party %d/%d"):format(bot.partyPresent, bot.partyTotal)
+	end
 	infoLabel.Text = ("DungeonBot: %s | %s | target: %s | dist: %s | mobs: %d%s"):format(
 		cfg.enabled and bot.state or "off",
 		runText,
@@ -1593,8 +1612,72 @@ local function inLobbyPlace()
 	return game.GameId == LOBBY_GAME_ID or game.PlaceId == LOBBY_GAME_ID
 end
 
-RunService.Heartbeat:Connect(function(deltaTime)
+-- Парсинг строки ников (через запятую/пробел/перенос) в массив.
+local function parseNicks(str)
+	local list = {}
+	if type(str) ~= "string" then
+		return list
+	end
+	for nick in string.gmatch(str, "[^,%s]+") do
+		table.insert(list, nick)
+	end
+	return list
+end
+
+-- Гейт «ждать всех игроков»: пока не все прокачиваемые (ники) загрузились в
+-- данже — держим стоп и не жмём старт. Снимается, когда все на месте ИЛИ
+-- истёк waitPlayersTimeout (фолбэк). Возвращает true = держать стоп.
+local function partyGate(now)
+	if not cfg.autoLevelEnabled or not cfg.autoWaitPlayers then
+		bot.partyWaitSince = nil
+		return false
+	end
+	if not inDungeonNow() then
+		bot.partyWaitSince = nil
+		return false
+	end
+	local nicks = parseNicks(cfg.autoLevelNicks)
+	if #nicks == 0 then
+		bot.partyWaitSince = nil
+		return false
+	end
+	if bot.partyWaitSince == nil then
+		bot.partyWaitSince = now
+	end
+	local present = 0
+	for _, nick in ipairs(nicks) do
+		local p = Players:FindFirstChild(nick)
+		if p ~= nil and p.Character ~= nil
+			and p.Character:FindFirstChild("HumanoidRootPart") ~= nil then
+			present += 1
+		end
+	end
+	bot.partyPresent = present
+	bot.partyTotal = #nicks
+	if present >= #nicks then
+		return false
+	end
+	-- Таймаут-фолбэк: кто-то так и не зашёл — стартуем всё равно.
+	if now - bot.partyWaitSince > cfg.waitPlayersTimeout then
+		if now - bot.partyLoggedAt > 5 then
+			bot.partyLoggedAt = now
+			log(("party: timeout (%d/%d), starting anyway"):format(present, #nicks))
+		end
+		return false
+	end
+	if now - bot.partyLoggedAt > 3 then
+		bot.partyLoggedAt = now
+		log(("party: waiting players %d/%d"):format(present, #nicks))
+	end
+	return true
+end
+
+local heartbeatConn
+heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 	local now = os.clock()
+	if unloaded then
+		return
+	end
 	if not cfg.enabled then
 		updateInfo(now)
 		return
@@ -1613,6 +1696,19 @@ RunService.Heartbeat:Connect(function(deltaTime)
 			bot.waitUntil = nil
 			log("character dead, waiting respawn")
 		end
+		return
+	end
+
+	-- Гейт «ждать всех игроков» (авто-лвл): пока не собрались все прокачиваемые
+	-- (ники) — стоим на месте, не фармим и не бежим по маршруту.
+	if partyGate(now) then
+		bot.state = "WAIT_PARTY"
+		bot.target = nil
+		bot.castTarget = nil
+		bot.waitUntil = nil
+		resetPathState()
+		humanoid:MoveTo(hrp.Position)
+		updateInfo(now)
 		return
 	end
 
@@ -2003,6 +2099,10 @@ local function autoStartTick()
 		end
 		bot.duoHoldUntil = nil
 	end
+	-- Авто-лвл: не стартуем данж, пока не собрались все прокачиваемые (ники).
+	if partyGate(os.clock()) then
+		return
+	end
 	if now - bot.inDungeonAt < startDelay then
 		return
 	end
@@ -2185,18 +2285,6 @@ local autoLevelState = {
 	createCooldownAt = 0,   -- троттлинг попыток создания данжа в лобби
 	createdForLevel = nil,  -- имя данжа, который уже создали в этом лобби
 }
-
--- Парсинг строки ников (через запятую/пробел/перенос) в массив.
-local function parseNicks(str)
-	local list = {}
-	if type(str) ~= "string" then
-		return list
-	end
-	for nick in string.gmatch(str, "[^,%s]+") do
-		table.insert(list, nick)
-	end
-	return list
-end
 
 -- Уровень игрока по нику: leaderstats.Level (NumberValue/IntValue). nil если нет.
 local function readPlayerLevel(nick)
@@ -2516,7 +2604,7 @@ end
 
 -- Быстрый опрос уровней (0.1с): успеть поймать лвл-ап до выхода аккаунта.
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(0.1)
 		local ok, err = pcall(autoLevelTick)
 		if not ok then
@@ -2551,7 +2639,7 @@ end
 
 local runSlotIndex = 0
 task.spawn(function()
-	while true do
+	while not unloaded do
 		local mode = runModeByName(cfg.runMode)
 		if mode == nil or mode.toolName == nil or not cfg.enabled or inLobbyPlace() then
 			runSlotIndex = 0
@@ -2578,7 +2666,7 @@ task.spawn(function()
 end)
 
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(0.5)
 		validateEnemies()
 		positionStuckTick()
@@ -2633,7 +2721,7 @@ local function resetOwnCharacter()
 end
 
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(0.1)
 		if not cfg.enabled or not cfg.duoDeathSync or not inDungeonNow() then
 			duoSync.partner = nil
@@ -2701,7 +2789,7 @@ local function collectSaverIds()
 end
 
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(1)
 		if not cfg.duoSaver then
 			duoCheck.offender = nil
@@ -2884,7 +2972,7 @@ local function storageRun()
 end
 
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(2)
 		if cfg.enabled and cfg.autoTransfer
 			and not storageState.moving and not storageState.blocked then
@@ -2973,7 +3061,7 @@ highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 
 rescanAll()
 task.spawn(function()
-	while true do
+	while not unloaded do
 		task.wait(5)
 		rescanAll()
 	end
@@ -3432,7 +3520,7 @@ task.spawn(function()
 		end,
 	})
 
-	autoLevelTab:CreateInput({
+	local nicksInput = autoLevelTab:CreateInput({
 		Name = "Ники прокачиваемых (через запятую)",
 		CurrentValue = cfg.autoLevelNicks,
 		PlaceholderText = "nick1, nick2, nick3",
@@ -3442,6 +3530,51 @@ task.spawn(function()
 			cfg.autoLevelNicks = tostring(text)
 			autoLevelState.levels = {}
 			log("auto level nicks: " .. tostring(text))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateButton({
+		Name = "Подловить всех (кроме себя) → в список",
+		Callback = function()
+			local names = {}
+			for _, player in ipairs(Players:GetPlayers()) do
+				if player ~= LocalPlayer then
+					table.insert(names, player.Name)
+				end
+			end
+			local text = table.concat(names, ", ")
+			cfg.autoLevelNicks = text
+			autoLevelState.levels = {}
+			pcall(function()
+				nicksInput:Set(text)
+			end)
+			log(("auto level: captured %d players -> %s"):format(#names, text))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateToggle({
+		Name = "Ждать всех игроков перед стартом",
+		CurrentValue = cfg.autoWaitPlayers,
+		Flag = "dbot_autowaitplayers",
+		Callback = function(value)
+			cfg.autoWaitPlayers = value
+			bot.partyWaitSince = nil
+			log("auto wait players: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
+	autoLevelTab:CreateSlider({
+		Name = "Таймаут ожидания игроков",
+		Range = { 10, 180 },
+		Increment = 5,
+		Suffix = "s",
+		CurrentValue = cfg.waitPlayersTimeout,
+		Flag = "dbot_waitplayerstimeout",
+		Callback = function(value)
+			cfg.waitPlayersTimeout = value
 			scheduleSave()
 		end,
 	})
@@ -3652,6 +3785,51 @@ task.spawn(function()
 		Name = "Сохранить конфиг сейчас",
 		Callback = function()
 			saveConfig()
+		end,
+	})
+
+	-- Полная выгрузка: гасим флаг (все while-циклы выходят), дисконнектим
+	-- Heartbeat, останавливаем перса, чистим GUI/маркеры/подсветку и
+	-- уничтожаем окно Rayfield. После — скрипт можно запустить заново.
+	local function doUnload()
+		unloaded = true
+		cfg.enabled = false
+		pcall(function()
+			if heartbeatConn ~= nil then
+				heartbeatConn:Disconnect()
+			end
+		end)
+		pcall(stopMovement)
+		pcall(function()
+			setSpawnMarkers(false)
+		end)
+		local _, hum = getCharParts()
+		if hum ~= nil then
+			pcall(function()
+				hum.AutoRotate = true
+			end)
+		end
+		pcall(function()
+			if highlight ~= nil then
+				highlight:Destroy()
+			end
+		end)
+		pcall(function()
+			if hudGui ~= nil then
+				hudGui:Destroy()
+			end
+		end)
+		_G.__DUNGEON_BOT_ACTIVE = false
+		log("unloaded")
+		pcall(function()
+			Rayfield:Destroy()
+		end)
+	end
+
+	configTab:CreateButton({
+		Name = "ВЫГРУЗИТЬ (Unload)",
+		Callback = function()
+			doUnload()
 		end,
 	})
 
