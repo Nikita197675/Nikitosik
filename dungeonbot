@@ -343,44 +343,42 @@ local DUNGEONS = {
 	},
 	["Samurai Palace"] = {
 		route = {
-			Vector3.new(-90, 5, -122),
-			Vector3.new(-41, 5, -76),
-			Vector3.new(-9, 5, 16),
-			Vector3.new(55, 5, -16),
-			Vector3.new(33, 5, 12),
-			Vector3.new(33, 17, 67),
-			Vector3.new(82, 17, 112),
-			Vector3.new(-26, 17, 122),
-			Vector3.new(27, 17, 128),
-			Vector3.new(28, 17, 171),
-			Vector3.new(71, 17, 230),
-			Vector3.new(-11, 17, 241),
-			Vector3.new(-38, 17, 269),
-			Vector3.new(-3, 17, 275),
-			Vector3.new(11, 17, 298),
-			Vector3.new(32, 29, 297),
-			Vector3.new(52, 49, 297),
-			Vector3.new(75, 72, 296),
-			Vector3.new(78, 73, 269),
-			Vector3.new(31, 73, 168),
-			Vector3.new(-49, 73, 236),
-			Vector3.new(-121, 70, 236),
-			Vector3.new(-193, 70, 235),
-			Vector3.new(-283, 69, 306),
-			Vector3.new(-301, 70, 373),
-			Vector3.new(-232, 70, 406),
-			Vector3.new(-306, 70, 466),
-			Vector3.new(-237, 70, 506),
-			Vector3.new(-142, 69, 566),
-			Vector3.new(8, 67, 597),
-			Vector3.new(100, 69, 601),
-			Vector3.new(188, 69, 618),
-			Vector3.new(187, 70, 678),
-			Vector3.new(177, 69, 739),
-			Vector3.new(130, 69, 918),
-			Vector3.new(25, 69, 976),
-			Vector3.new(-79, 72, 991),
-			Vector3.new(-224, 71, 1009),
+			Vector3.new(-92, 5, -126),
+			Vector3.new(-39, 5, -74),
+			Vector3.new(-6, 5, 7),
+			Vector3.new(68, 5, -18),
+			Vector3.new(34, 5, 15),
+			Vector3.new(33, 17, 77),
+			Vector3.new(-18, 17, 116),
+			Vector3.new(82, 17, 116),
+			Vector3.new(28, 17, 134),
+			Vector3.new(28, 17, 170),
+			Vector3.new(71, 17, 242),
+			Vector3.new(-29, 17, 244),
+			Vector3.new(-38, 17, 272),
+			Vector3.new(-4, 17, 274),
+			Vector3.new(3, 17, 297),
+			Vector3.new(34, 30, 296),
+			Vector3.new(57, 54, 296),
+			Vector3.new(75, 72, 295),
+			Vector3.new(87, 73, 295),
+			Vector3.new(32, 73, 168),
+			Vector3.new(-45, 73, 235),
+			Vector3.new(-117, 70, 236),
+			Vector3.new(-202, 70, 236),
+			Vector3.new(-279, 69, 302),
+			Vector3.new(-309, 70, 370),
+			Vector3.new(-237, 70, 406),
+			Vector3.new(-305, 70, 465),
+			Vector3.new(-239, 71, 504),
+			Vector3.new(-139, 69, 571),
+			Vector3.new(-23, 67, 592),
+			Vector3.new(135, 69, 601),
+			Vector3.new(190, 69, 618),
+			Vector3.new(177, 69, 742),
+			Vector3.new(132, 69, 917),
+			Vector3.new(22, 69, 974),
+			Vector3.new(-224, 71, 1008),
 		},
 	},
 	["The Canals"] = {
@@ -2301,6 +2299,7 @@ local autoLevelState = {
 	createCooldownAt = 0,   -- троттлинг попыток создания данжа в лобби
 	createdForLevel = nil,  -- имя данжа, который уже создали в этом лобби
 	runLevel = nil,         -- уровень на входе в текущий забег (для детекта смены сложности)
+	lastPlayPressAt = 0,    -- троттлинг авто-нажатия Play (открыть очередь)
 }
 
 -- Уровень игрока по нику: leaderstats.Level (NumberValue/IntValue). nil если нет.
@@ -2427,6 +2426,50 @@ local function getQueueGui()
 		return nil
 	end
 	return pg:FindFirstChild("queueGui")
+end
+
+-- Очередь открыта? (панель queueGui: один из экранов виден). Нужно, чтобы не
+-- жать Play повторно (это тумблер — закроет уже открытую очередь).
+local function isQueueOpen()
+	local q = getQueueGui()
+	if q == nil then
+		return false
+	end
+	for _, n in ipairs({ "selectOption", "chooseDungeon", "lobbyInfo", "gameSearch" }) do
+		local c = q:FindFirstChild(n)
+		if c ~= nil and c:IsA("GuiObject") and c.Visible then
+			return true
+		end
+	end
+	return false
+end
+
+-- Авто-нажатие кнопки Play в лобби (mainInterface.buttons.playButton): её
+-- обработчик (MouseButton1Down) открывает очередь (getPanel("queue").Open()).
+-- Без открытой очереди создание данжа не проходит. fireGuiClick включает
+-- MouseButton1Down через getconnections.
+local function pressPlayButton()
+	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+	if pg == nil then
+		return false
+	end
+	local mainInterface = pg:FindFirstChild("mainInterface")
+	if mainInterface == nil then
+		return false
+	end
+	local btn = nil
+	local buttons = mainInterface:FindFirstChild("buttons")
+	if buttons ~= nil then
+		btn = buttons:FindFirstChild("playButton")
+	end
+	if btn == nil then
+		btn = mainInterface:FindFirstChild("playButton", true)
+	end
+	if btn == nil then
+		return false
+	end
+	fireGuiClick(btn)
+	return true
 end
 
 -- ФОЛБЭК (если нет remote createLobby): создание через клики по UI.
@@ -2623,12 +2666,20 @@ local function autoLevelTick()
 		if not cfg.autoCreate then
 			return
 		end
+		-- Авто-нажатие Play при загрузке в лобби: открываем очередь (без неё
+		-- создание данжа не проходит). Жмём, только если очередь закрыта, с
+		-- троттлингом (Play — тумблер, не закрыть уже открытую).
+		if not isQueueOpen() and now - (autoLevelState.lastPlayPressAt or 0) > 3 then
+			autoLevelState.lastPlayPressAt = now
+			pressPlayButton()
+			log("auto-level: lobby -> press Play (open queue)")
+		end
 		local nicks = parseNicks(cfg.autoLevelNicks)
 		local decisionLevel = minSavedLevel(nicks)
 		if decisionLevel == nil then
 			if now - autoLevelState.lastLogAt > 15 then
 				autoLevelState.lastLogAt = now
-				log("auto-level: lobby — нет сохранённых уровней (levels.json пуст)")
+				log("auto-level: lobby — нет уровней (ни live, ни levels.json)")
 			end
 			return
 		end
@@ -2640,10 +2691,9 @@ local function autoLevelTick()
 			end
 			return
 		end
-		if autoLevelState.createdForLevel == entry.name then
-			return
-		end
-		if now - autoLevelState.createCooldownAt < 8 then
+		-- Ретрай по кулдауну (без жёсткой блокировки): если создание не прошло,
+		-- повторяем. При успехе startDungeon телепортит из лобби — повтора не будет.
+		if now - autoLevelState.createCooldownAt < 12 then
 			return
 		end
 		autoLevelState.createCooldownAt = now
@@ -2659,7 +2709,6 @@ local function autoLevelTick()
 		task.spawn(function()
 			local ok, err = createDungeon(entry.name, diff, cfg.autoHardcore)
 			if ok then
-				autoLevelState.createdForLevel = entry.name
 				log("auto-level: createDungeon fired")
 			else
 				log("auto-level: createDungeon failed: " .. tostring(err))
