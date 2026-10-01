@@ -2300,6 +2300,7 @@ local autoLevelState = {
 	lastLogAt = 0,
 	createCooldownAt = 0,   -- троттлинг попыток создания данжа в лобби
 	createdForLevel = nil,  -- имя данжа, который уже создали в этом лобби
+	runLevel = nil,         -- уровень на входе в текущий забег (для детекта смены сложности)
 }
 
 -- Уровень игрока по нику: leaderstats.Level (NumberValue/IntValue). nil если нет.
@@ -2428,9 +2429,9 @@ local function getQueueGui()
 	return pg:FindFirstChild("queueGui")
 end
 
--- Создание данжа: выбрать данж в dungeonDropdown -> сложность -> хардкор ВКЛ
--- -> createGame. Возвращает true, если дошли до клика по createGame.
-local function createDungeon(name, difficulty, hardcore)
+-- ФОЛБЭК (если нет remote createLobby): создание через клики по UI.
+-- Выбрать данж в dungeonDropdown -> сложность -> хардкор ВКЛ -> createGame.
+local function createDungeonUI(name, difficulty, hardcore)
 	local queueGui = getQueueGui()
 	if queueGui == nil then
 		return false, "queueGui not found"
@@ -2485,6 +2486,38 @@ local function createDungeon(name, difficulty, hardcore)
 	end
 	fireGuiClick(createBtn)
 	return true
+end
+
+-- Создание данжа РЕАЛЬНЫМ путём игры (из дампа Player.rbxmx): хост-кнопка
+-- startMain вызывает remotes.createLobby:InvokeServer(name, difficulty,
+-- levelReq, hardcore, private, waveDefence) -> true, затем remotes.startDungeon
+-- :FireServer() (хост жмёт start) телепортит пати в данж. Джойнеры заходят в
+-- сам данж авто-джойнером. levelReq = 0 (без ограничения на вход).
+local function createDungeon(name, difficulty, hardcore)
+	local remotes = ReplicatedStorage:FindFirstChild("remotes")
+	local createLobby = remotes ~= nil and remotes:FindFirstChild("createLobby") or nil
+	if createLobby ~= nil and createLobby:IsA("RemoteFunction") then
+		local ok, result = pcall(function()
+			return createLobby:InvokeServer(name, difficulty, 0, hardcore == true, false, false)
+		end)
+		if not ok then
+			return false, "createLobby invoke error"
+		end
+		if result ~= true then
+			return false, "createLobby returned " .. tostring(result)
+		end
+		-- Хост жмёт старт -> телепорт пати в данж.
+		task.wait(0.3)
+		local startDungeon = remotes:FindFirstChild("startDungeon")
+		if startDungeon ~= nil and startDungeon:IsA("RemoteEvent") then
+			pcall(function()
+				startDungeon:FireServer()
+			end)
+		end
+		return true
+	end
+	-- Фолбэк: UI-клики, если remote createLobby не найден.
+	return createDungeonUI(name, difficulty, hardcore)
 end
 
 -- Сохранение «следующей цели» для отдельного скрипта захода (join).
@@ -2567,6 +2600,7 @@ local function autoLevelTick()
 	if not cfg.autoLevelEnabled then
 		autoLevelState.exitFired = false
 		autoLevelState.createdForLevel = nil
+		autoLevelState.runLevel = nil
 		return
 	end
 	local now = os.clock()
@@ -2585,6 +2619,7 @@ local function autoLevelTick()
 	-- при выходе из данжа). Если кто-то из них всё же в лобби — обновим live.
 	if not inDungeonNow() then
 		autoLevelState.exitFired = false
+		autoLevelState.runLevel = nil
 		if not cfg.autoCreate then
 			return
 		end
@@ -2654,15 +2689,36 @@ local function autoLevelTick()
 		return
 	end
 
-	-- Выход в лобби: мин. уровень перерос текущий данж (level > maxLvl).
-	local info = dnValue ~= nil and levelDungeonInfo(dnValue) or nil
-	if info ~= nil and minLevel > info.maxLvl and not autoLevelState.exitFired then
+	-- Уровень на входе в этот забег (фиксируем один раз): по нему знаем, какую
+	-- сложность данж создавался (Insane X0–X4 / Nightmare X5–X9).
+	if autoLevelState.runLevel == nil then
+		autoLevelState.runLevel = minLevel
+	end
+
+	-- Выход в лобби, если целевой данж ИЛИ сложность для текущего мин. уровня
+	-- отличаются от того, что идёт сейчас:
+	--  - сменился данж (level перерос бэнд, напр. 89->90), ИЛИ
+	--  - сменилась сложность внутри данжа (напр. 84->85: Insane->Nightmare).
+	local desiredEntry = pickDungeonForLevel(minLevel)
+	local desiredDiff = pickDifficultyForLevel(minLevel)
+	local runDiff = pickDifficultyForLevel(autoLevelState.runLevel)
+	local needExit = false
+	local reason = ""
+	if desiredEntry ~= nil then
+		if desiredEntry.name ~= dnValue then
+			needExit = true
+			reason = ("dungeon %s -> %s"):format(tostring(dnValue), desiredEntry.name)
+		elseif desiredDiff ~= runDiff then
+			needExit = true
+			reason = ("difficulty %s -> %s"):format(runDiff, desiredDiff)
+		end
+	end
+	if needExit and not autoLevelState.exitFired then
 		autoLevelState.exitFired = true
 		saveLevels()
 		local ok, err = fireReturnToLobby()
 		if ok then
-			log(("auto-level: lvl %d > %s (max %d) -> return to lobby"):format(
-				minLevel, dnValue, info.maxLvl))
+			log(("auto-level: lvl %d, %s -> return to lobby"):format(minLevel, reason))
 		else
 			log("auto-level: return to lobby failed: " .. tostring(err))
 			autoLevelState.exitFired = false
