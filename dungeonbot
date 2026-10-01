@@ -510,6 +510,7 @@ local cfg = {
 	transferThreshold = 280,
 	highlight = true,
 	showLog = false,
+	showPlayers = false,
 	-- Авто-лвл (отдельная вкладка): ники прокачиваемых аккаунтов, тумблер,
 	-- режим бега (ускоряющий скилл вместо спид-буста).
 	autoLevelEnabled = false,
@@ -658,6 +659,7 @@ local function resetRoute()
 end
 
 local hudGui, infoLabel, routeLabel, logLabel, logFrame, highlight
+local playersFrame, playersLabel
 
 local logLines = {}
 
@@ -864,6 +866,32 @@ local function buildHud()
 	logLabel.TextWrapped = true
 	logLabel.ZIndex = 11
 	logLabel.Parent = logFrame
+
+	-- Окно игроков: список ников всех игроков в данже, обновляется раз в 1с.
+	-- Та же позиция, что лог-окно, но чуть выше. По умолчанию выключено.
+	playersFrame = Instance.new("Frame")
+	playersFrame.Size = UDim2.fromOffset(420, 150)
+	playersFrame.Position = UDim2.new(0, 10, 1, -330)
+	playersFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+	playersFrame.BackgroundTransparency = 0.25
+	playersFrame.BorderSizePixel = 0
+	playersFrame.ZIndex = 10
+	playersFrame.Visible = cfg.showPlayers
+	playersFrame.Parent = hudGui
+
+	playersLabel = Instance.new("TextLabel")
+	playersLabel.Size = UDim2.new(1, -10, 1, -10)
+	playersLabel.Position = UDim2.fromOffset(5, 5)
+	playersLabel.BackgroundTransparency = 1
+	playersLabel.TextColor3 = Color3.fromRGB(180, 200, 235)
+	playersLabel.Font = Enum.Font.Code
+	playersLabel.TextSize = 12
+	playersLabel.Text = ""
+	playersLabel.TextXAlignment = Enum.TextXAlignment.Left
+	playersLabel.TextYAlignment = Enum.TextYAlignment.Top
+	playersLabel.TextWrapped = true
+	playersLabel.ZIndex = 11
+	playersLabel.Parent = playersFrame
 end
 
 local function getCharParts()
@@ -1221,6 +1249,28 @@ task.spawn(function()
 	while not unloaded do
 		task.wait(math.max(cfg.retargetInterval * rand(0.85, 1.15), 0.1))
 		retargetTick()
+	end
+end)
+
+-- Окно игроков: раз в 1с собираем ники всех игроков в данже (на сервере)
+-- и пишем в playersLabel. Обновляем, только когда окно видимо.
+local function updatePlayersList()
+	if playersLabel == nil or not cfg.showPlayers then
+		return
+	end
+	local names = {}
+	for _, player in ipairs(Players:GetPlayers()) do
+		table.insert(names, player.Name)
+	end
+	table.sort(names)
+	local header = ("Игроки (%d):"):format(#names)
+	playersLabel.Text = header .. "\n" .. table.concat(names, "\n")
+end
+
+task.spawn(function()
+	while not unloaded do
+		task.wait(1)
+		updatePlayersList()
 	end
 end)
 
@@ -3603,6 +3653,21 @@ task.spawn(function()
 			cfg.showLog = value
 			if logFrame ~= nil then
 				logFrame.Visible = value
+			end
+		end,
+	})
+
+	debugTab:CreateToggle({
+		Name = "Окно игроков",
+		CurrentValue = cfg.showPlayers,
+		Flag = "dbot_players",
+		Callback = function(value)
+			cfg.showPlayers = value
+			if playersFrame ~= nil then
+				playersFrame.Visible = value
+			end
+			if value then
+				updatePlayersList()
 			end
 		end,
 	})
