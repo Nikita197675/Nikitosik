@@ -79,6 +79,29 @@ local function track(conn)
 	return conn
 end
 
+-- Поиск игрока по нику БЕЗ учёта регистра (в Roblox ник часто с заглавными,
+-- а в поле вписывают маленькими) — сравниваем в нижнем регистре и Name, и
+-- DisplayName. Иначе Players:FindFirstChild (регистрозависим) не найдёт и
+-- авто-лив ошибочно сработает.
+local function playerPresentByName(name)
+	if type(name) ~= "string" or name == "" then
+		return false
+	end
+	local lower = string.lower(name)
+	for _, p in ipairs(Players:GetPlayers()) do
+		if string.lower(p.Name) == lower then
+			return true
+		end
+		local ok, disp = pcall(function()
+			return p.DisplayName
+		end)
+		if ok and type(disp) == "string" and string.lower(disp) == lower then
+			return true
+		end
+	end
+	return false
+end
+
 -- == Сохранение настроек (ник + состояние авто-джойна) ==
 -- Файл AutoJoiner/config.json в папке executor'а: ник и вкл/выкл авто-джойна
 -- переживают перезапуск/телепорт и подгружаются сами при старте.
@@ -507,7 +530,7 @@ local function runOther()
 			while _G.__AUTOJOINER_ACTIVE and not left do
 				task.wait(2)
 				if os.clock() - startAt >= JOIN_GRACE then
-					local present = Players:FindFirstChild(target) ~= nil
+					local present = playerPresentByName(target)
 					if present then
 						absentSince = nil
 					else
