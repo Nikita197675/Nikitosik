@@ -14,9 +14,9 @@
 -- Авто-лвл-апер (вкладка Auto Level): вписываешь ники прокачиваемых аккаунтов
 -- и сам запускаешь данж; в данже бот подхватывает роут по workspace.dungeonName,
 -- читает уровни ников (leaderstats.Level), сохраняет в DungeonBot/levels.json и,
--- как только мин. уровень перерастает текущий данж (level > maxLvl из
--- LEVEL_DUNGEONS, диапазоны 70–130), выходит в лобби (ReturnToLobbyEvent).
--- Заход в следующий данж — отдельный скрипт (позже).
+-- как только мин. уровень перерастает текущий данж/сложность либо >= target
+-- метода (LEVEL_METHODS: 70-130 лив на 130; 140-155 лив на 155), выходит в
+-- лобби (ReturnToLobbyEvent); на target'е создание данжей больше не идёт.
 -- Автостарт: бот включён сразу при загрузке; настройки (данж, мастер, тумблеры,
 -- слайдеры, стоп-дистанция/каст, способности в слотах) хранятся в
 -- DungeonBot/config.json (вкладка Config: сохранить/загрузить/сброс, автосейв
@@ -464,19 +464,103 @@ local DUNGEONS = {
 			Vector3.new(1518, -36, -431),
 		},
 	},
+	["Orbital Outpost"] = {
+		route = {
+			Vector3.new(29, 9, 157),
+			Vector3.new(42, 9, 157),
+			Vector3.new(63, 10, 121),
+			Vector3.new(106, 15, 119),
+			Vector3.new(155, 19, 111),
+			Vector3.new(165, 19, 61),
+			Vector3.new(199, 19, 45),
+			Vector3.new(262, 19, 40),
+			Vector3.new(272, 20, -34),
+			Vector3.new(271, 20, -133),
+			Vector3.new(315, 20, -200),
+			Vector3.new(313, 20, -243),
+			Vector3.new(270, 16, -263),
+			Vector3.new(263, 16, -320),
+			Vector3.new(312, 16, -359),
+			Vector3.new(352, 17, -475),
+			Vector3.new(258, 17, -475),
+			Vector3.new(202, 21, -443),
+			Vector3.new(103, 18, -454),
+			Vector3.new(87, 18, -395),
+			Vector3.new(134, 18, -383),
+			Vector3.new(133, 19, -320),
+			Vector3.new(77, 5, -318),
+			Vector3.new(35, 5, -323),
+			Vector3.new(7, 5, -340),
+			Vector3.new(-13, 5, -381),
+			Vector3.new(4, 5, -326),
+			Vector3.new(4, 21, -283),
+			Vector3.new(-46, 21, -280),
+			Vector3.new(-46, 21, -160),
+		},
+	},
+	["Volcanic Chambers"] = {
+		route = {
+			Vector3.new(192, 4, 699),
+			Vector3.new(28, 4, 699),
+			Vector3.new(-85, 6, 698),
+			Vector3.new(-261, 6, 700),
+			Vector3.new(-472, 4, 699),
+			Vector3.new(-625, 4, 698),
+			Vector3.new(-782, 4, 698),
+			Vector3.new(-943, 4, 697),
+			Vector3.new(-1080, 4, 698),
+			Vector3.new(-1210, 15, 699),
+			Vector3.new(-1278, 15, 699),
+			Vector3.new(-1334, 10, 697),
+			Vector3.new(-1370, 5, 725),
+			Vector3.new(-1420, -3, 735),
+			Vector3.new(-1451, -8, 705),
+			Vector3.new(-1478, -13, 670),
+			Vector3.new(-1508, -16, 665),
+			Vector3.new(-1541, -19, 695),
+			Vector3.new(-1577, -20, 695),
+			Vector3.new(-1600, -20, 655),
+			Vector3.new(-1613, -15, 631),
+			Vector3.new(-1640, -9, 622),
+			Vector3.new(-1696, -9, 613),
+			Vector3.new(-1729, -3, 611),
+			Vector3.new(-1751, 5, 640),
+			Vector3.new(-1746, 13, 672),
+			Vector3.new(-1734, 15, 694),
+			Vector3.new(-1872, 13, 696),
+			Vector3.new(-1985, 13, 696),
+			Vector3.new(-2154, 13, 697),
+			Vector3.new(-2391, 13, 695),
+		},
+	},
 }
 
--- Авто-лвл: диапазоны уровней данжей (из routes.txt). Порядок = прогрессия.
--- Бот читает уровни заданных ников в данже; как только мин. уровень
--- перерастает текущий данж (level > maxLvl) — выходит в лобби
--- (ReturnToLobbyEvent). Заход в следующий данж — отдельный скрипт (позже).
-local LEVEL_DUNGEONS = {
-	{ name = "King's Castle",    minLvl = 70,  maxLvl = 79 },
-	{ name = "The Underworld",   minLvl = 80,  maxLvl = 89 },
-	{ name = "Samurai Palace",   minLvl = 90,  maxLvl = 99 },
-	{ name = "The Canals",       minLvl = 100, maxLvl = 109 },
-	{ name = "Ghastly Harbor",   minLvl = 110, maxLvl = 119 },
-	{ name = "Steampunk Sewers", minLvl = 120, maxLvl = 129 },
+-- Авто-лвл: МЕТОДЫ прокачки. Метод = список данжей с диапазонами уровней
+-- (порядок = прогрессия) + целевой уровень target. Бот читает уровни заданных
+-- ников в данже; мин. уровень перерос данж/сложность -> выход в лобби
+-- (ReturnToLobbyEvent) и создание следующего. Мин. уровень >= target ->
+-- альт ЛИВАЕТ: выход в лобби и создание больше НЕ идёт (метод завершён).
+local LEVEL_METHODS = {
+	["70-130"] = {
+		label = "70-130",
+		target = 130,
+		dungeons = {
+			{ name = "King's Castle",    minLvl = 70,  maxLvl = 79 },
+			{ name = "The Underworld",   minLvl = 80,  maxLvl = 89 },
+			{ name = "Samurai Palace",   minLvl = 90,  maxLvl = 99 },
+			{ name = "The Canals",       minLvl = 100, maxLvl = 109 },
+			{ name = "Ghastly Harbor",   minLvl = 110, maxLvl = 119 },
+			{ name = "Steampunk Sewers", minLvl = 120, maxLvl = 129 },
+		},
+	},
+	["140-155"] = {
+		label = "140-155",
+		target = 155,
+		dungeons = {
+			{ name = "Orbital Outpost",   minLvl = 140, maxLvl = 149 },
+			{ name = "Volcanic Chambers", minLvl = 150, maxLvl = 159 },
+		},
+	},
 }
 
 local cfg = {
@@ -522,6 +606,10 @@ local cfg = {
 	-- Ждать всех прокачиваемых (ников) перед стартом+движением в данже.
 	autoWaitPlayers = true,
 	waitPlayersTimeout = 60,
+	-- Метод прокачки (LEVEL_METHODS): "70-130" (default) или "140-155".
+	-- Сейф-мод: на предпоследней точке роута не идти к боссу, а слать replayDungeon.
+	autoLevelMethod = "70-130",
+	autoSafeMode = false,
 }
 
 -- Список способностей для выбора в слотах (GUI: Способность 1 / Способность 2).
@@ -620,6 +708,10 @@ local bot = {
 	partyPresent = 0,
 	partyTotal = 0,
 	partyLoggedAt = 0,
+	-- Сейф-мод: pending — дошли до предпоследней точки, реплей нужен;
+	-- fired — реплей уже отправлен (без повторов до следующего resetRoute).
+	safeReplayPending = false,
+	safeReplayFired = false,
 }
 
 -- Флаг выгрузки (кнопка Unload в Config): все while-циклы его проверяют и
@@ -655,6 +747,8 @@ local function resetRoute()
 	bot.routeDone = false
 	bot.routeLastWp = nil
 	bot.routeLastDist = nil
+	bot.safeReplayPending = false
+	bot.safeReplayFired = false
 	resetPathState()
 end
 
@@ -1655,9 +1749,10 @@ local function updateInfo(now)
 				bot.routeDone and "complete"
 					or (bot.state == "ROUTE" and "moving"
 					or (bot.state == "GATE_HOLD" and "boss gate"
-					or (bot.state == "WAIT_SKILLS" and "skills" or "waiting")))
+					or (bot.state == "SAFE_HOLD" and "safe: wait replay"
+					or (bot.state == "WAIT_SKILLS" and "skills" or "waiting"))))
 			)
-			routeLabel.TextColor3 = (bot.state == "ROUTE" or bot.state == "GATE_HOLD") and Color3.fromRGB(255, 220, 120) or Color3.fromRGB(160, 180, 200)
+			routeLabel.TextColor3 = (bot.state == "ROUTE" or bot.state == "GATE_HOLD" or bot.state == "SAFE_HOLD") and Color3.fromRGB(255, 220, 120) or Color3.fromRGB(160, 180, 200)
 		else
 			routeLabel.Text = "route: none (select dungeon)"
 		end
@@ -1852,11 +1947,24 @@ heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 		end
 	end
 
+	-- Сейф-мод, последний сегмент роута (цель — предпоследняя точка): бой
+	-- выключен полностью — бот бежит к точке, ждёт реплей, босса не триггерит.
+	-- Существующая цель (пойманный раньше босс/моб) снимается.
+	local safeLastSegment = false
+	if cfg.autoSafeMode and not bot.routeDone then
+		local wpsSafe = getRoute(bot.currentDungeon)
+		safeLastSegment = wpsSafe ~= nil and #wpsSafe >= 2
+			and bot.routeIndex >= #wpsSafe - 1 and bot.routeIndex <= #wpsSafe
+	end
+	if safeLastSegment and bot.target ~= nil then
+		setTarget(nil, "safe mode")
+	end
+
 	-- Ranged-каст: моб в радиусе каста (обычный 90, босс-гейт 80; LOS не
 	-- нужен — боссы за барьерами). Аимлок телом. Скиллы стреляют по сигналу
 	-- готовности из игры (cooldown <= 0 and not busyCasting) — без таймеров.
 	bot.castTarget = nil
-	if effectiveCastRange() > 0 then
+	if not safeLastSegment and effectiveCastRange() > 0 then
 		local castTarget = findCastTarget(hrp)
 		if castTarget ~= nil then
 			bot.castTarget = castTarget
@@ -1895,7 +2003,7 @@ heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 			bot.target = nil
 			bot.nextRetargetAt = now + rand(0.15, 0.4)
 		end
-		if now >= bot.nextRetargetAt and now >= bot.nextAcquireAt then
+		if not safeLastSegment and now >= bot.nextRetargetAt and now >= bot.nextAcquireAt then
 			local best, bestScore = pickTarget()
 			if best ~= nil then
 				local engage
@@ -1930,7 +2038,7 @@ heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 				-- Босс-гейт: точка не засчитывается, пока в bossGateRadius от неё
 				-- есть живой враг. Смерть не сбрасывает routeIndex — после респавна
 				-- бот сам возвращается к этой точке и дерётся, пока гейт закрыт.
-				if isBoss and dist < cfg.bossGateRadius and countEnemiesNear(wpPos, cfg.bossGateRadius) > 0 then
+				if isBoss and not safeLastSegment and dist < cfg.bossGateRadius and countEnemiesNear(wpPos, cfg.bossGateRadius) > 0 then
 					if bot.state ~= "ROUTE" and bot.state ~= "GATE_HOLD" then
 						log(("boss gate: enemies at wp %d/%d, holding"):format(bot.routeIndex, #waypoints))
 					end
@@ -1944,7 +2052,7 @@ heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 					return
 				end
 
-				if bot.state ~= "ROUTE" then
+				if bot.state ~= "ROUTE" and bot.state ~= "SAFE_HOLD" then
 					bot.state = "ROUTE"
 					bot.routeDone = false
 					resetPathState()
@@ -1955,6 +2063,20 @@ heartbeatConn = RunService.Heartbeat:Connect(function(deltaTime)
 					log(("route: heading to waypoint %d/%d"):format(bot.routeIndex, #waypoints))
 				end
 				if dist < ROUTE_ARRIVE then
+					-- Сейф-мод: остановка на ПРЕДПОСЛЕДНЕй точке (не идём к боссу,
+					-- не добиваем). Флаг pending ставим раз; держим точку каждый кадр,
+					-- safeReplayTick шлёт replayDungeon (resetRoute сбросит флаг на новом данже).
+					if cfg.autoSafeMode and #waypoints >= 2 and bot.routeIndex >= #waypoints - 1 then
+						if not bot.safeReplayPending then
+							bot.safeReplayPending = true
+							log("safe mode: penultimate waypoint reached, replay instead of boss")
+						end
+						bot.state = "SAFE_HOLD"
+						bot.routeDone = false
+						humanoid:MoveTo(hrp.Position)
+						updateInfo(now)
+						return
+					end
 					if isBoss then
 						log(("boss gate: cleared, advancing from wp %d/%d"):format(bot.routeIndex, #waypoints))
 					else
@@ -2333,13 +2455,34 @@ local function autoReplayTick()
 	end
 end
 
+-- Сейф-мод: дошли до предпоследней точки (флаг ставит роут-логика Heartbeat) ->
+-- СРАЗУ шлём replayDungeon (тот же ремоут, что после босса), без ожидания дропа.
+-- Фолбэков нет (по выбору). FireServer ok != сервер принял: шлём каждые 15с,
+-- пока стоим на предпоследней (pending снимает resetRoute на новом данже).
+local function safeReplayTick()
+	if not cfg.enabled or not cfg.autoSafeMode or not bot.safeReplayPending then
+		return
+	end
+	local now = os.clock()
+	if now - bot.lastReplayFire < 15 then
+		return
+	end
+	bot.lastReplayFire = now
+	local ok, err = fireReplayRemote()
+	if ok then
+		log("safe mode: replayDungeon fired (boss skipped)")
+	else
+		log("safe mode: replay failed: " .. tostring(err))
+	end
+end
+
 -- == Авто-лвл-апер (вкладка Auto Level) ==
 -- Поток: игрок вписывает ники прокачиваемых аккаунтов и сам запускает данж.
 -- Бот в данже читает уровни этих ников (leaderstats.Level), сохраняет их в
 -- DungeonBot/levels.json (для будущего отдельного скрипта переключения данжей),
 -- авто-подхватывает нужный роут по workspace.dungeonName и, как только мин.
--- уровень перерастает текущий данж (level > maxLvl из LEVEL_DUNGEONS), выходит
--- в лобби (ReturnToLobbyEvent). Заход в следующий данж — отдельный скрипт.
+-- уровень перерастает текущий данж/сложность либо >= target метода (130/155),
+-- выходит в лобби (ReturnToLobbyEvent). На target'е создание не возобновляет.
 
 local autoLevelState = {
 	levels = {},        -- nick -> level (последнее прочитанное)
@@ -2396,9 +2539,14 @@ local function fireReturnToLobby()
 	return ok, err
 end
 
--- Диапазон уровней для данжа из LEVEL_DUNGEONS (по имени из dungeonDropdown).
+-- Метод прокачки по cfg.autoLevelMethod (невалидное значение -> 70-130).
+local function levelMethod()
+	return LEVEL_METHODS[cfg.autoLevelMethod] or LEVEL_METHODS["70-130"]
+end
+
+-- Диапазон уровней для данжа выбранного метода (по имени из dungeonDropdown).
 local function levelDungeonInfo(name)
-	for _, entry in ipairs(LEVEL_DUNGEONS) do
+	for _, entry in ipairs(levelMethod().dungeons) do
 		if entry.name == name then
 			return entry
 		end
@@ -2406,9 +2554,9 @@ local function levelDungeonInfo(name)
 	return nil
 end
 
--- Данж по уровню (диапазон содержит level). nil если вне 70–129.
+-- Данж по уровню в выбранном методе (диапазон содержит level). nil если вне диапазона метода.
 local function pickDungeonForLevel(level)
-	for _, entry in ipairs(LEVEL_DUNGEONS) do
+	for _, entry in ipairs(levelMethod().dungeons) do
 		if level >= entry.minLvl and level <= entry.maxLvl then
 			return entry
 		end
@@ -2716,14 +2864,7 @@ local function autoLevelTick()
 		if not cfg.autoCreate then
 			return
 		end
-		-- Авто-нажатие Play при загрузке в лобби: открываем очередь (без неё
-		-- создание данжа не проходит). Жмём, только если очередь закрыта, с
-		-- троттлингом (Play — тумблер, не закрыть уже открытую).
-		if not isQueueOpen() and now - (autoLevelState.lastPlayPressAt or 0) > 3 then
-			autoLevelState.lastPlayPressAt = now
-			pressPlayButton()
-			log("auto-level: lobby -> press Play (open queue)")
-		end
+		local method = levelMethod()
 		local nicks = parseNicks(cfg.autoLevelNicks)
 		local decisionLevel = minSavedLevel(nicks)
 		if decisionLevel == nil then
@@ -2733,11 +2874,30 @@ local function autoLevelTick()
 			end
 			return
 		end
+		-- Метод завершён: мин. уровень >= target — лив состоялся, альт стоит
+		-- в лобби; Play не жмём, данж не создаём.
+		if decisionLevel >= method.target then
+			if now - autoLevelState.lastLogAt > 60 then
+				autoLevelState.lastLogAt = now
+				log(("auto-level: lvl %d >= target %d — метод %s завершён, создание не идёт"):format(
+					decisionLevel, method.target, method.label))
+			end
+			return
+		end
+		-- Авто-нажатие Play при загрузке в лобби: открываем очередь (без неё
+		-- создание данжа не проходит). Жмём, только если очередь закрыта, с
+		-- троттлингом (Play — тумблер, не закрыть уже открытую).
+		if not isQueueOpen() and now - (autoLevelState.lastPlayPressAt or 0) > 3 then
+			autoLevelState.lastPlayPressAt = now
+			pressPlayButton()
+			log("auto-level: lobby -> press Play (open queue)")
+		end
 		local entry = pickDungeonForLevel(decisionLevel)
 		if entry == nil then
 			if now - autoLevelState.lastLogAt > 15 then
 				autoLevelState.lastLogAt = now
-				log(("auto-level: lvl %d вне диапазона 70–129 — создание пропущено"):format(decisionLevel))
+				log(("auto-level: lvl %d вне диапазона метода %s — создание пропущено"):format(
+					decisionLevel, method.label))
 			end
 			return
 		end
@@ -2794,22 +2954,29 @@ local function autoLevelTick()
 		autoLevelState.runLevel = minLevel
 	end
 
-	-- Выход в лобби, если целевой данж ИЛИ сложность для текущего мин. уровня
-	-- отличаются от того, что идёт сейчас:
+	-- Выход в лобби:
+	--  - ПРИОРИТЕТ: мин. уровень альтов >= target метода (130 / 155) — цель
+	--    метода достигнута, лив (в лобби создание уже заблокировано target'ом);
 	--  - сменился данж (level перерос бэнд, напр. 89->90), ИЛИ
 	--  - сменилась сложность внутри данжа (напр. 84->85: Insane->Nightmare).
-	local desiredEntry = pickDungeonForLevel(minLevel)
-	local desiredDiff = pickDifficultyForLevel(minLevel)
-	local runDiff = pickDifficultyForLevel(autoLevelState.runLevel)
+	local methodCfg = levelMethod()
 	local needExit = false
 	local reason = ""
-	if desiredEntry ~= nil then
-		if desiredEntry.name ~= dnValue then
-			needExit = true
-			reason = ("dungeon %s -> %s"):format(tostring(dnValue), desiredEntry.name)
-		elseif desiredDiff ~= runDiff then
-			needExit = true
-			reason = ("difficulty %s -> %s"):format(runDiff, desiredDiff)
+	if minLevel >= methodCfg.target then
+		needExit = true
+		reason = ("target lvl %d reached (method %s)"):format(methodCfg.target, methodCfg.label)
+	else
+		local desiredEntry = pickDungeonForLevel(minLevel)
+		local desiredDiff = pickDifficultyForLevel(minLevel)
+		local runDiff = pickDifficultyForLevel(autoLevelState.runLevel)
+		if desiredEntry ~= nil then
+			if desiredEntry.name ~= dnValue then
+				needExit = true
+				reason = ("dungeon %s -> %s"):format(tostring(dnValue), desiredEntry.name)
+			elseif desiredDiff ~= runDiff then
+				needExit = true
+				reason = ("difficulty %s -> %s"):format(runDiff, desiredDiff)
+			end
 		end
 	end
 	if needExit and not autoLevelState.exitFired then
@@ -2886,6 +3053,7 @@ task.spawn(function()
 		computeTimeoutTick()
 		autoStartTick()
 		autoReplayTick()
+		safeReplayTick()
 	end
 end)
 
@@ -3750,6 +3918,31 @@ task.spawn(function()
 		end,
 	})
 
+	-- Метод прокачки: диапазон данжей + целевой уровень (LEVEL_METHODS).
+	-- 70-130:King's Castle...Steampunk Sewers, лив на 130;
+	-- 140-155: Orbital Outpost + Volcanic Chambers, лив на 155.
+	autoLevelTab:CreateDropdown({
+		Name = "Метод прокачки (уровни)",
+		Options = { "70-130", "140-155" },
+		CurrentValue = (LEVEL_METHODS[cfg.autoLevelMethod] ~= nil and cfg.autoLevelMethod) or "70-130",
+		Flag = "dbot_levelmethod",
+		Callback = function(option)
+			local name = option
+			if typeof(option) == "table" then
+				name = option[1] or option.CurrentValue
+			end
+			if type(name) == "string" and LEVEL_METHODS[name] ~= nil then
+				cfg.autoLevelMethod = name
+			else
+				cfg.autoLevelMethod = "70-130"
+			end
+			autoLevelState.runLevel = nil
+			autoLevelState.createdForLevel = nil
+			log("auto level: method -> " .. cfg.autoLevelMethod)
+			scheduleSave()
+		end,
+	})
+
 	local nicksInput = autoLevelTab:CreateInput({
 		Name = "Ники прокачиваемых (через запятую)",
 		CurrentValue = cfg.autoLevelNicks,
@@ -3861,6 +4054,19 @@ task.spawn(function()
 		end,
 	})
 
+	autoLevelTab:CreateToggle({
+		Name = "Сейф-мод: не добивать босса, реплей на предпоследней точке",
+		CurrentValue = cfg.autoSafeMode,
+		Flag = "dbot_safemode",
+		Callback = function(value)
+			cfg.autoSafeMode = value
+			bot.safeReplayPending = false
+			bot.safeReplayFired = false
+			log("safe mode: " .. tostring(value))
+			scheduleSave()
+		end,
+	})
+
 	autoLevelTab:CreateButton({
 		Name = "Создать данж по текущему уровню (тест)",
 		Callback = function()
@@ -3871,7 +4077,7 @@ task.spawn(function()
 			end
 			local entry = pickDungeonForLevel(minLevel)
 			if entry == nil then
-				log(("auto level: lvl %d вне диапазона 70–129"):format(minLevel))
+				log(("auto level: lvl %d вне диапазона метода %s"):format(minLevel, levelMethod().label))
 				return
 			end
 			local diff = pickDifficultyForLevel(minLevel)
@@ -3887,7 +4093,7 @@ task.spawn(function()
 	pcall(function()
 		autoLevelTab:CreateParagraph({
 			Title = "Авто-лвл-апер",
-			Content = "Вписываешь ники прокачиваемых аккаунтов и сам запускаешь данж. В данже бот подхватывает роут по названию данжа, читает уровни этих ников (leaderstats.Level, опрос 0.1с чтобы успеть поймать лвл-ап до выхода) и сохраняет их в DungeonBot/levels.json. Как только минимальный уровень перерастает текущий данж (level > макс. уровня диапазона) — бот выходит в лобби (ReturnToLobbyEvent) и создаёт данж на некст уровень: данж по диапазону, сложность Insane (X0–X4) / Nightmare (X5–X9), хардкор всегда вкл. Цель пишется в DungeonBot/next_target.json для отдельного скрипта захода. Режим бега: ускоряющий скилл вместо спид-буста — Pulse Waves жмутся по очереди каждые 2.9с, персонаж бежит без остановки.",
+			Content = "Вписываешь ники прокачиваемых аккаунтов и сам запускаешь данж. Метод прокачки: 70-130 (King's Castle...Steampunk Sewers) или 140-155 (Orbital Outpost, Volcanic Chambers). В данже бот подхватывает роут по названию данжа, читает уровни ников (leaderstats.Level, опрос 0.1с) и сохраняет в DungeonBot/levels.json. Мин. уровень перерос данж/сложность — выход в лобби и создание следующего (Insane X0–X4 / Nightmare X5–X9, хардкор вкл). Мин. уровень >= целевого метода (130 / 155) — Лив: альт выходит в лобби и остаётся, создание больше не идёт. Сейф-мод: на предпоследней точке роута бот не идёт к боссу и не добивает его, а сразу шлёт replayDungeon (новый забег). Цель пишется в DungeonBot/next_target.json для скрипта захода. Режим бега: ускоряющий скилл вместо спид-буста.",
 		})
 	end)
 
