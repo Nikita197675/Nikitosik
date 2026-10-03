@@ -30,6 +30,7 @@ local HttpService = game:GetService("HttpService")
 local LocalPlayer = Players.LocalPlayer
 
 local LOBBY_PLACE_ID = 77649408247578
+local DUNGEON_PLACE_ID = 85776757589518
 local RETRY = 2
 
 -- == Авто-лоад после телепорта (queue_on_teleport) ==
@@ -601,8 +602,71 @@ local function runOther()
 	end
 end
 
+-- == Ветка ДАНЖА (PlaceId 85776757589518): постоянно жмём Ready ==
+-- Кнопка readyButton появляется в PlayerGui когда dungeonProgress ==
+-- "playersNotReady". Путь: readyButton.Frame["3d"].Frame.TextButton.
+-- Обработчик: TextButton.Activated -> remotes.readyUp:FireServer().
+-- Жмём постоянно в цикле, пока кнопка не исчезнет (не нажмёт).
+local function runDungeonReady()
+	local function pressReadyButton()
+		local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+		if playerGui == nil then
+			return false
+		end
+		local readyButton = playerGui:FindFirstChild("readyButton")
+		if readyButton == nil then
+			return false
+		end
+		local frame = readyButton:FindFirstChild("Frame")
+		if frame == nil then
+			return false
+		end
+		local threeD = frame:FindFirstChild("3d")
+		if threeD == nil then
+			return false
+		end
+		local innerFrame = threeD:FindFirstChild("Frame")
+		if innerFrame == nil then
+			return false
+		end
+		local textButton = innerFrame:FindFirstChild("TextButton")
+		if textButton == nil then
+			return false
+		end
+		-- Прямой вызов Activated (как в игре).
+		if getconnections ~= nil then
+			local ok, conns = pcall(getconnections, textButton.Activated)
+			if ok and type(conns) == "table" then
+				for _, conn in ipairs(conns) do
+					pcall(function()
+						conn:Fire()
+					end)
+				end
+				return true
+			end
+		end
+		if firesignal ~= nil then
+			pcall(function()
+				firesignal(textButton.Activated)
+			end)
+			return true
+		end
+		return false
+	end
+
+	-- Цикл: раз в 0.5с проверяем и жмём Ready, пока кнопка видна.
+	task.spawn(function()
+		while _G.__AUTOJOINER_ACTIVE do
+			task.wait(0.5)
+			pcall(pressReadyButton)
+		end
+	end)
+end
+
 if game.PlaceId == LOBBY_PLACE_ID then
 	runLobby()
+elseif game.PlaceId == DUNGEON_PLACE_ID then
+	runDungeonReady()
 else
 	runOther()
 end
