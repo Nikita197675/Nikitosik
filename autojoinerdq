@@ -786,6 +786,69 @@ local function runDungeonReady()
 		})
 	end))
 
+	-- Авто-лив: если целевой игрок (ник из конфига) не найден или ушёл -> выход в лобби.
+	-- Edge-детект: лив только после того, как цель хоть раз увидели и она пропала.
+	-- Если цель так и не появилась за NEVER_SEEN_LIMIT -> лив (не тот инстанс).
+	local function leaveToLobby()
+		local remotes = ReplicatedStorage:FindFirstChild("remotes")
+		if remotes == nil then
+			return
+		end
+		local tl = remotes:FindFirstChild("teleToLobby")
+		if tl ~= nil and tl:IsA("RemoteEvent") then
+			pcall(function()
+				tl:FireServer()
+			end)
+			return
+		end
+		local lg = remotes:FindFirstChild("leaveGame")
+		if lg ~= nil and lg:IsA("RemoteEvent") then
+			pcall(function()
+				lg:FireServer()
+			end)
+		end
+	end
+
+	local target = ""
+	if type(saved.target) == "string" then
+		target = saved.target:gsub("^%s+", ""):gsub("%s+$", "")
+	end
+	if target ~= "" then
+		task.spawn(function()
+			local startAt = os.clock()
+			local absentSince = nil
+			local seenTarget = false
+			local left = false
+			while _G.__AUTOJOINER_ACTIVE and not left do
+				task.wait(1)
+				local present = playerPresentByName(target)
+				local now = os.clock()
+				if present then
+					seenTarget = true
+					absentSince = nil
+				elseif absentSince == nil then
+					absentSince = now
+				end
+
+				if present then
+					-- цель в данже
+				elseif seenTarget then
+					local gone = now - absentSince
+					if gone > ABSENCE_LIMIT then
+						left = true
+						leaveToLobby()
+					end
+				else
+					local waited = now - startAt
+					if waited > NEVER_SEEN_LIMIT then
+						left = true
+						leaveToLobby()
+					end
+				end
+			end
+		end)
+	end
+
 	-- Цикл: раз в 0.5с проверяем и жмём Ready, пока кнопка видна и тумблер вкл.
 	task.spawn(function()
 		while _G.__AUTOJOINER_ACTIVE do
