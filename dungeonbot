@@ -865,6 +865,9 @@ end
 
 -- == Сохранение конфига (файл DungeonBot/config.json в папке executor'а) ==
 
+-- Forward declaration: autoLevelState используется в saveConfig, но объявлен ниже.
+local autoLevelState
+
 -- Конфиг — ПЕРСОНАЛЬНЫЙ на аккаунт (DungeonBot/config_<ник>.json): два
 -- игрока на одном executor'е не перезаписывают роли/настройки друг друга.
 local function configFilePath()
@@ -2599,7 +2602,7 @@ end
 -- уровень перерастает текущий данж/сложность либо >= target метода (155),
 -- выходит в лобби (ReturnToLobbyEvent). На target'е создание не возобновляет.
 
-local autoLevelState = {
+autoLevelState = {
 	levels = {},        -- nick -> level (последнее прочитанное)
 	lastMinLevel = nil, -- бэкап мин. уровня (для лобби, где альтов нет)
 	exitFired = false,  -- защита от спама ReturnToLobbyEvent
@@ -2803,8 +2806,10 @@ end
 
 -- Авто-нажатие кнопки Play в лобби (mainInterface.buttons.playButton): её
 -- обработчик (MouseButton1Down) открывает очередь (getPanel("queue").Open()).
--- Без открытой очереди создание данжа не проходит. fireGuiClick включает
--- MouseButton1Down через getconnections.
+-- Без открытой очереди создание данжа не проходит.
+-- ВАЖНО: MouseButton1Down ожидает НОЛЬ аргументов — fireGuiClick с fakeInput
+-- вызывает ошибку внутри pcall (проглатывается), обработчик не срабатывает.
+-- Поэтому зовём напрямую через getconnections без аргументов.
 local function pressPlayButton()
 	local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
 	if pg == nil then
@@ -2825,8 +2830,26 @@ local function pressPlayButton()
 	if btn == nil then
 		return false
 	end
-	fireGuiClick(btn)
-	return true
+	-- Прямой вызов MouseButton1Down без аргументов (как в игре).
+	if getconnections ~= nil then
+		local ok, conns = pcall(getconnections, btn.MouseButton1Down)
+		if ok and type(conns) == "table" then
+			for _, conn in ipairs(conns) do
+				pcall(function()
+					conn:Fire()
+				end)
+			end
+			return true
+		end
+	end
+	-- Фолбэк: firesignal (тоже без аргументов).
+	if firesignal ~= nil then
+		pcall(function()
+			firesignal(btn.MouseButton1Down)
+		end)
+		return true
+	end
+	return false
 end
 
 -- ФОЛБЭК (если нет remote createLobby): создание через клики по UI.
