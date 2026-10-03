@@ -607,9 +607,12 @@ end
 -- "playersNotReady". Путь: readyButton.Frame["3d"].Frame.TextButton.
 -- Обработчик: TextButton.Activated -> remotes.readyUp:FireServer().
 -- Жмём постоянно в цикле, пока кнопка не исчезнет (не нажмёт).
--- GUI: тумблер Auto-Ready (вкл/выкл).
+-- GUI: тумблер Auto-Ready (вкл/выкл, по умолчанию выкл), перетаскиваемая.
+-- Клавиша G -> выход в лобби (teleToLobby, фолбэк leaveGame).
+-- Состояние тумблера сохраняется в AutoJoiner/config.json (dungeonReady).
 local function runDungeonReady()
-	local state = { enabled = true }
+	local saved = loadConfig()
+	local state = { enabled = saved.dungeonReady == true }
 
 	local function pressReadyButton()
 		local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
@@ -692,9 +695,9 @@ local function runDungeonReady()
 	local toggle = Instance.new("TextButton")
 	toggle.Size = UDim2.new(1, -20, 0, 30)
 	toggle.Position = UDim2.fromOffset(10, 36)
-	toggle.BackgroundColor3 = Color3.fromRGB(45, 80, 55)
+	toggle.BackgroundColor3 = Color3.fromRGB(70, 55, 55)
 	toggle.BorderSizePixel = 0
-	toggle.Text = "Auto-Ready: ON"
+	toggle.Text = "Auto-Ready: OFF"
 	toggle.TextColor3 = Color3.fromRGB(235, 235, 235)
 	toggle.Font = Enum.Font.GothamBold
 	toggle.TextSize = 14
@@ -715,9 +718,72 @@ local function runDungeonReady()
 	end
 	refreshToggle()
 
+	-- Перетаскивание за заголовок.
+	do
+		local dragging = false
+		local dragStart, startPos
+		track(title.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = true
+				dragStart = input.Position
+				startPos = main.Position
+			end
+		end))
+		track(UserInputService.InputChanged:Connect(function(input)
+			if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+				or input.UserInputType == Enum.UserInputType.Touch) then
+				local delta = input.Position - dragStart
+				main.Position = UDim2.new(
+					startPos.X.Scale, startPos.X.Offset + delta.X,
+					startPos.Y.Scale, startPos.Y.Offset + delta.Y
+				)
+			end
+		end))
+		track(UserInputService.InputEnded:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.MouseButton1
+				or input.UserInputType == Enum.UserInputType.Touch then
+				dragging = false
+			end
+		end))
+	end
+
+	-- Клавиша G -> выход в лобби (teleToLobby, фолбэк leaveGame).
+	track(UserInputService.InputBegan:Connect(function(input, gameProcessedEvent)
+		if gameProcessedEvent then
+			return
+		end
+		if UserInputService:GetFocusedTextBox() ~= nil then
+			return
+		end
+		if input.KeyCode == Enum.KeyCode.G then
+			local remotes = ReplicatedStorage:FindFirstChild("remotes")
+			if remotes ~= nil then
+				local tl = remotes:FindFirstChild("teleToLobby")
+				if tl ~= nil and tl:IsA("RemoteEvent") then
+					pcall(function()
+						tl:FireServer()
+					end)
+					return
+				end
+				local lg = remotes:FindFirstChild("leaveGame")
+				if lg ~= nil and lg:IsA("RemoteEvent") then
+					pcall(function()
+						lg:FireServer()
+					end)
+				end
+			end
+		end
+	end))
+
 	track(toggle.MouseButton1Click:Connect(function()
 		state.enabled = not state.enabled
 		refreshToggle()
+		saveConfig({
+			target = type(saved.target) == "string" and saved.target or "",
+			enabled = saved.enabled == true,
+			dungeonReady = state.enabled,
+		})
 	end))
 
 	-- Цикл: раз в 0.5с проверяем и жмём Ready, пока кнопка видна и тумблер вкл.
