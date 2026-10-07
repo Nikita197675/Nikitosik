@@ -1,0 +1,216 @@
+-- AFK Q/E Auto Press + AntiAFK (эксплоит) | работает даже когда окно не в фокусе
+-- Логика AntiAFK твоя, пофикшена (Instance.new -> GetService)
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local LocalPlayer = Players.LocalPlayer
+local speaker = LocalPlayer
+
+-- // 1. ANTI-AFK ВСЕГДА ВКЛ (твоя логика)
+local antiAfkCon = nil
+do
+    if getconnections then
+        pcall(function()
+            for _, c in getconnections(speaker.Idled) do
+                pcall(function() c:Disable() end)
+                pcall(function() c:Disconnect() end)
+            end
+        end)
+    end
+    pcall(function() if antiAfkCon then antiAfkCon:Disconnect() end end)
+
+    -- правильный способ получить VirtualInputManager (не Instance.new)
+    local vimOk, vim = pcall(function()
+        local s = game:GetService("VirtualInputManager")
+        return (cloneref and cloneref(s) or s)
+    end)
+
+    antiAfkCon = speaker.Idled:Connect(function()
+        -- основной метод - через VirtualInputManager (работает в фоне, без фокуса)
+        if vimOk and vim then
+            pcall(function()
+                vim:SendMouseButtonEvent(0, 0, 0, true, game, 0)
+                vim:SendMouseButtonEvent(0, 0, 0, false, game, 0)
+            end)
+        end
+        -- фолбэк для эксплоитов без VIM
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            vu:CaptureController()
+            vu:ClickButton1(Vector2.new())
+        end)
+    end)
+end
+
+-- // 2. АВТО-НАЖАТИЕ Q/E по очереди каждые 2 сек (работает в фоне)
+local Enabled = false
+local Interval = 2
+local Keys = {Enum.KeyCode.Q, Enum.KeyCode.E}
+local idx = 1
+local loopThread = nil
+
+local function getVIM()
+    local ok, vim = pcall(function()
+        local s = game:GetService("VirtualInputManager")
+        return (cloneref and cloneref(s) or s)
+    end)
+    if ok and vim and vim.SendKeyEvent then return vim end
+    return nil
+end
+
+local function sendKey(keyCode)
+    -- 1 приоритет: VirtualInputManager:SendKeyEvent - работает даже если окно не в фокусе (виртуальный инпут)
+    local vim = getVIM()
+    if vim then
+        pcall(function()
+            vim:SendKeyEvent(true, keyCode, false, game)
+            task.wait(0.05)
+            vim:SendKeyEvent(false, keyCode, false, game)
+        end)
+        return
+    end
+    -- 2 фолбэк: keypress/keyrelease (старые эксплоиты, тоже в фоне)
+    if keypress and keyrelease then
+        local code = (keyCode == Enum.KeyCode.Q) and 0x51 or 0x45
+        pcall(function()
+            keypress(code)
+            task.wait(0.05)
+            keyrelease(code)
+        end)
+        return
+    end
+    -- 3 фолбэк: VirtualUser
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:CaptureController()
+    end)
+end
+
+local function startLoop()
+    if loopThread then return end
+    loopThread = task.spawn(function()
+        while Enabled do
+            sendKey(Keys[idx])
+            idx = (idx == 1) and 2 or 1
+            task.wait(Interval)
+        end
+        loopThread = nil
+    end)
+end
+
+local function stopLoop()
+    Enabled = false
+    -- поток сам выйдет на следующем wait, не надо убивать
+end
+
+-- // 3. ЛЕГКАЯ ГУИШКА Вкл/Выкл
+local parentGui = (gethui and gethui()) or (pcall(function() return game:GetService("CoreGui") end) and game:GetService("CoreGui")) or LocalPlayer:WaitForChild("PlayerGui")
+
+local gui = Instance.new("ScreenGui")
+gui.Name = "AFK_QE_GUI"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = parentGui
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.fromOffset(210, 115)
+frame.Position = UDim2.fromScale(0.05, 0.5)
+frame.AnchorPoint = Vector2.new(0, 0.5)
+frame.BackgroundColor3 = Color3.fromRGB(22, 22, 24)
+frame.BorderSizePixel = 0
+frame.Parent = gui
+Instance.new("UICorner", frame).CornerRadius = UDim.new(0, 10)
+local stroke = Instance.new("UIStroke", frame)
+stroke.Color = Color3.fromRGB(55, 55, 58)
+stroke.Thickness = 1
+stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+
+local title = Instance.new("TextLabel", frame)
+title.Size = UDim2.new(1, -35, 0, 26)
+title.Position = UDim2.fromOffset(10, 6)
+title.BackgroundTransparency = 1
+title.Text = "AFK  Q / E"
+title.TextColor3 = Color3.fromRGB(235,235,235)
+title.Font = Enum.Font.GothamBold
+title.TextSize = 13
+title.TextXAlignment = Enum.TextXAlignment.Left
+
+local close = Instance.new("TextButton", frame)
+close.Size = UDim2.fromOffset(22, 22)
+close.Position = UDim2.new(1, -26, 0, 6)
+close.Text = "×"
+close.Font = Enum.Font.GothamBold
+close.TextSize = 18
+close.TextColor3 = Color3.fromRGB(200,200,200)
+close.BackgroundColor3 = Color3.fromRGB(38,38,40)
+close.AutoButtonColor = true
+Instance.new("UICorner", close).CornerRadius = UDim.new(0, 6)
+
+local toggle = Instance.new("TextButton", frame)
+toggle.Size = UDim2.fromOffset(190, 38)
+toggle.Position = UDim2.fromOffset(10, 36)
+toggle.Text = "ВЫКЛ  •  Нажми чтобы вкл"
+toggle.Font = Enum.Font.GothamBold
+toggle.TextSize = 13
+toggle.TextColor3 = Color3.fromRGB(255,255,255)
+toggle.BackgroundColor3 = Color3.fromRGB(170, 45, 45)
+toggle.AutoButtonColor = true
+Instance.new("UICorner", toggle).CornerRadius = UDim.new(0, 8)
+
+local status = Instance.new("TextLabel", frame)
+status.Size = UDim2.fromOffset(190, 16)
+status.Position = UDim2.fromOffset(10, 82)
+status.BackgroundTransparency = 1
+status.Text = "Анти-АФК: ✅ всегда вкл  |  Фон: да"
+status.TextColor3 = Color3.fromRGB(145,145,145)
+status.Font = Enum.Font.Gotham
+status.TextSize = 11
+status.TextXAlignment = Enum.TextXAlignment.Center
+
+local info = Instance.new("TextLabel", frame)
+info.Size = UDim2.fromOffset(190, 12)
+info.Position = UDim2.fromOffset(10, 97)
+info.BackgroundTransparency = 1
+info.Text = "Q → E каждые 2 сек • работает без фокуса"
+info.TextColor3 = Color3.fromRGB(110,110,110)
+info.Font = Enum.Font.Gotham
+info.TextSize = 10
+
+close.MouseButton1Click:Connect(function()
+    gui:Destroy()
+    stopLoop()
+end)
+
+toggle.MouseButton1Click:Connect(function()
+    Enabled = not Enabled
+    if Enabled then
+        toggle.Text = "ВКЛ  •  Нажми чтобы выкл"
+        toggle.BackgroundColor3 = Color3.fromRGB(40, 165, 75)
+        status.Text = "Жмёт: Q → E каждые 2с..."
+        startLoop()
+    else
+        toggle.Text = "ВЫКЛ  •  Нажми чтобы вкл"
+        toggle.BackgroundColor3 = Color3.fromRGB(170, 45, 45)
+        status.Text = "Пауза • Анти-АФК: ✅ всегда вкл"
+        stopLoop()
+    end
+end)
+
+-- перетаскивание
+local dragging, dragStart, startPos
+frame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = frame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
